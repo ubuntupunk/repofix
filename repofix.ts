@@ -7,7 +7,7 @@ import chalk from 'chalk';
 import fetch from 'node-fetch';
 import os from 'os';
 
-const CONFIG_PATH = './repocheck.config.json';
+const CONFIG_PATH = './repofix.config.json';
 const COMMUNITY_DB_URL = 'https://raw.githubusercontent.com/ubuntupunk/repofix/main/special-cases.json';
 
 interface AliasConfig {
@@ -121,7 +121,9 @@ async function fetchCommunitySolutions(): Promise<CommunitySolution[]> {
 async function initializeConfig() {
     console.log(chalk.blue('Welcome to repocheck configuration setup!'));
     const mode = readlineSync.question(
-        chalk.white('Choose an option:\n  1. Scan monorepo and configure\n  2. Configure special cases only\n  3. Reset config\nEnter number (1-3): '),
+        chalk.white(
+            'Choose an option:\n  1. Scan monorepo and configure\n  2. Configure special cases only\n  3. Reset config\nEnter number (1-3): ',
+        ),
         { limit: ['1', '2', '3'] },
     );
 
@@ -203,10 +205,9 @@ async function initializeConfig() {
 
             // Custom special case
             const importPath = readlineSync.question(chalk.white('Enter import path (e.g., @old/lib): '));
-            const action = readlineSync.question(
-                chalk.white('Action (rename/replace-method/exclude): '),
-                { limit: ['rename', 'replace-method', 'exclude'] },
-            ) as 'rename' | 'replace-method' | 'exclude';
+            const action = readlineSync.question(chalk.white('Action (rename/replace-method/exclude): '), {
+                limit: ['rename', 'replace-method', 'exclude'],
+            }) as 'rename' | 'replace-method' | 'exclude';
             let value: string | undefined;
             let prefixOnly: boolean | undefined;
             if (action === 'rename') {
@@ -260,8 +261,416 @@ interface ImportIssue {
 
 // [Previous functions remain unchanged: resolveImportPath, findMatchingAlias, convertToAliasPath, findCommentedImports, confirmFix]
 
+function resolveImportPath(importPath: string, file: SourceFile): string | null {
+    const fileDir = dirname(file.getFilePath());
+    if (importPath.startsWith('.')) {
+        const resolved = resolve(fileDir, importPath);
+        return existsSync(resolved) || existsSync(resolved + '.ts') || existsSync(resolved + '.tsx') ? resolved : null;
+    }
+
+    const aliasRoot = importPath.split('/')[0];
+    const aliasPath = importPath.includes('/') ? importPath.split('/').slice(0, 2).join('/') : aliasRoot;
+
+    if (config.aliases[aliasPath]) {
+        const relativePart = importPath.replace(`${aliasPath}/`, '');
+        const resolved = resolve(config.aliases[aliasPath].path, relativePart);
+        return existsSync(resolved) || existsSync(resolved + '.ts') || existsSync(resolved + '.tsx') ? resolved : null;
+    } else if (config.aliases[aliasRoot]) {
+        const relativePart = importPath.replace(`${aliasRoot}/`, '');
+        const resolved = resolve(config.aliases[aliasRoot].path, relativePart);
+        return existsSync(resolved) || existsSync(resolved + '.ts') || existsSync(resolved + '.tsx') ? resolved : null;
+    } else {
+        try {
+            return require.resolve(importPath, { paths: [process.cwd()] });
+        } catch {
+            return null;
+        }
+    }
+}
+
+function findMatchingAlias(resolvedPath: string | null): string | null {
+    if (!resolvedPath) return null;
+    const possibleAliases = Object.entries(config.aliases)
+        .filter(([_, config]) => resolvedPath.startsWith(config.path))
+        .map(([alias]) => alias)
+        .sort((a, b) => b.length - a.length);
+    return possibleAliases[0] || null;
+}
+
+function convertToAliasPath(resolvedPath: string, alias: string): string | null {
+    const aliasConfig = config.aliases[alias];
+    if (!aliasConfig) return null;
+    const relativePart = relative(aliasConfig.path, resolvedPath).replace(/\\/g, '/');
+    if (relativePart.startsWith('..')) return null;
+    return `${alias}/${relativePart}`;
+}
+
+function findCommentedImports(file: SourceFile): Array<{ text: string; line: number; commentType: string }> {
+    const commentedImports: Array<{ text: string; line: number; commentType: string }> = [];
+    const fullText = file.getFullText();
+    const lines = fullText.split('\n');
+    lines.forEach((lineText, index) => {
+        const trimmed = lineText.trim();
+        if (
+            (trimmed.startsWith('//') || trimmed.startsWith('#')) &&
+            trimmed.includes('import') &&
+            trimmed.includes('from')
+        ) {
+            commentedImports.push({
+                text: trimmed,
+                line: index + 1,
+                commentType: trimmed.startsWith('//') ? 'single-line' : 'hash',
+            });
+        }
+    });
+    file.getDescendantsOfKind(SyntaxKind.MultiLineCommentTrivia).forEach((comment) => {
+        const commentText = comment.getText();
+        if (commentText.includes('import') && commentText.includes('from')) {
+            const lines = commentText.split('\n').map((l) => l.replace(/^\s*\*+\s*/, '').trim());
+            const importLine = lines.find((l) => l.startsWith('import'));
+            if (importLine) {
+                commentedImports.push({
+                    text: importLine,
+                    line: comment.getStartLineNumber(),
+                    commentType: 'multi-line',
+                });
+            }
+        }
+    });
+    return commentedImports;
+}
+
+function confirmFix(issue: ImportIssue): boolean {
+    console.log(chalk.red(`\nIssue in ${issue.file}:${issue.line}`));
+    console.log(chalk.white(`  Import: ${issue.importPath}`));
+    console.log(chalk.yellow(`  Problem: ${issue.issue}`));
+    console.log(chalk.cyan(`  Suggested fix: ${issue.suggestion || 'No suggestion available'}`));
+    const options = issue.suggestion ? ['Apply fix', 'Skip'] : ['Skip'];
+    const question = chalk.white(
+        `Choose an option:\n${options.map((opt, i) => `  ${i + 1}. ${opt}`).join('\n')}\nEnter number (1-${options.length}): `,
+    );
+    const choice = readlineSync.question(question, {
+        limit: options.map((_, i) => (i + 1).toString()),
+        defaultInput: '2',
+    });
+    return choice === '1';
+}
+
 async function repocheck() {
-    // [Previous repocheck implementation remains unchanged]
+    const communitySolutions = await fetchCommunitySolutions();
+    for (const dir of config.directories) {
+        console.log(chalk.blue(`\nStarting repocheck for ${dir.path}`));
+        console.log(chalk.gray(`Auto-fix: ${AUTO_FIX}${INTERACTIVE ? ' (interactive)' : ''}`));
+        console.log(chalk.gray(`Report will be saved to ${dir.report}`));
+
+        const project = new Project({ tsConfigFilePath: dir.tsconfig });
+        let files = project.getSourceFiles(`${dir.path}/**/*.{ts,tsx}`);
+        if (files.length === 0) {
+            console.log(chalk.yellow(`No .ts/.tsx files found in ${dir.path}. Trying broader pattern...`));
+            files = project.getSourceFiles(`${dir.path}/**/*.{ts,tsx,js,jsx}`);
+        }
+        console.log(chalk.cyan(`Found ${files.length} files to process`));
+
+        const issues: ImportIssue[] = [];
+
+        for (const file of files) {
+            const filePath = file.getFilePath();
+            const relativeFilePath = relative(process.cwd(), filePath);
+            console.log(chalk.white(`\nProcessing: ${relativeFilePath}`));
+
+            const imports = file.getImportDeclarations();
+            let fileModified = false;
+
+            for (const importDecl of imports) {
+                const importPath = importDecl.getModuleSpecifierValue();
+                const line = importDecl.getStartLineNumber();
+
+                if (!importPath.startsWith('.') && !importPath.startsWith('@')) continue;
+                if (importPath.startsWith('@') && !Object.keys(config.aliases).some((a) => importPath.startsWith(a))) {
+                    const rootPkg = importPath.split('/')[0];
+                    if (dir.dependencies?.[rootPkg] || existsSync(resolve('node_modules', rootPkg))) continue;
+                }
+
+                console.log(chalk.gray(`  Checking import: ${importPath} (line ${line})`));
+                const resolvedPath = resolveImportPath(importPath, file);
+
+                const specialCase = Object.entries(config.specialCases).find(([key]) =>
+                    config.specialCases[key].prefixOnly ? importPath.startsWith(key) : importPath === key,
+                );
+                if (specialCase) {
+                    const [key, special] = specialCase;
+                    let suggestion: string | null = null;
+                    let newImportPath: string | undefined;
+                    const communityMatch = communitySolutions.find((sol) => sol.from === importPath);
+
+                    if (special.action === 'rename') {
+                        newImportPath = special.prefixOnly ? importPath.replace(key, special.value!) : special.value;
+                        suggestion = `Rename to: import ... from '${newImportPath}'`;
+                    } else if (special.action === 'replace-method') {
+                        newImportPath = special.value;
+                        suggestion =
+                            communityMatch?.description ||
+                            `Replace with: import { useUser } from '${newImportPath}' (adjust usage accordingly)`;
+                    } else {
+                        suggestion = 'Excluded from checks';
+                    }
+
+                    const issue: ImportIssue = {
+                        file: relativeFilePath,
+                        line,
+                        importPath,
+                        issue: `Special case: ${special.action}`,
+                        suggestion,
+                    };
+
+                    if (AUTO_FIX && newImportPath && special.action !== 'exclude') {
+                        if (INTERACTIVE && !confirmFix(issue)) {
+                            issue.userChoice = 'Skipped';
+                            console.log(chalk.yellow(`  Skipped fixing import: ${importPath}`));
+                        } else {
+                            importDecl.setModuleSpecifier(newImportPath);
+                            issue.fixed = true;
+                            fileModified = true;
+                            console.log(chalk.green(`  Fixed: Changed to '${newImportPath}'`));
+                        }
+                    }
+                    issues.push(issue);
+                    continue;
+                }
+
+                if (importPath.startsWith('.')) {
+                    const suggestedAlias = findMatchingAlias(resolvedPath);
+                    if (suggestedAlias) {
+                        const relativeImportPath = convertToAliasPath(resolvedPath, suggestedAlias);
+                        const issue: ImportIssue = {
+                            file: relativeFilePath,
+                            line,
+                            importPath,
+                            issue: `Relative import should use alias '${suggestedAlias}'`,
+                            suggestion: `Change to: import ... from '${relativeImportPath}'`,
+                        };
+
+                        if (AUTO_FIX && relativeImportPath) {
+                            if (INTERACTIVE && !confirmFix(issue)) {
+                                issue.userChoice = 'Skipped';
+                                console.log(chalk.yellow(`  Skipped fixing import: ${importPath}`));
+                            } else {
+                                importDecl.setModuleSpecifier(relativeImportPath);
+                                issue.fixed = true;
+                                fileModified = true;
+                                console.log(chalk.green(`  Fixed: Changed to '${relativeImportPath}'`));
+                            }
+                        }
+                        issues.push(issue);
+                    } else if (!resolvedPath) {
+                        issues.push({
+                            file: relativeFilePath,
+                            line,
+                            importPath,
+                            issue: `Relative import '${importPath}' cannot be resolved`,
+                            suggestion: `File not found at ${resolve(dirname(filePath), importPath)}`,
+                        });
+                    }
+                } else if (importPath.startsWith('@')) {
+                    const aliasRoot = importPath.split('/')[0];
+                    const fullAlias = importPath.includes('/')
+                        ? importPath.split('/').slice(0, 2).join('/')
+                        : aliasRoot;
+
+                    if (!config.aliases[fullAlias] && !config.aliases[aliasRoot]) {
+                        const rootPkg = aliasRoot;
+                        const isSpecialCaseRoot = Object.keys(config.specialCases).some((key) =>
+                            config.specialCases[key].prefixOnly ? key.startsWith(rootPkg) : key === rootPkg,
+                        );
+                        const suggestion =
+                            isSpecialCaseRoot || dir.dependencies?.[rootPkg]
+                                ? null
+                                : `Module '${rootPkg}' not found. Run: bun add ${rootPkg}`;
+                        issues.push({
+                            file: relativeFilePath,
+                            line,
+                            importPath,
+                            issue: `Unknown alias '${fullAlias}' or '${aliasRoot}'`,
+                            suggestion: suggestion || 'Verify alias in tsconfig.json or use relative path',
+                        });
+                    } else {
+                        const expectedPath = config.aliases[fullAlias]?.path || config.aliases[aliasRoot]?.path;
+                        if (resolvedPath && expectedPath && !resolvedPath.startsWith(expectedPath)) {
+                            const suggestedAlias = findMatchingAlias(resolvedPath);
+                            const relativeImportPath = suggestedAlias
+                                ? convertToAliasPath(resolvedPath, suggestedAlias)
+                                : null;
+                            const issue: ImportIssue = {
+                                file: relativeFilePath,
+                                line,
+                                importPath,
+                                issue: `Alias '${importPath}' resolves incorrectly`,
+                                suggestion: relativeImportPath
+                                    ? `Change to: import ... from '${relativeImportPath}'`
+                                    : `Verify path for '${importPath}'`,
+                            };
+
+                            if (AUTO_FIX && relativeImportPath) {
+                                if (INTERACTIVE && !confirmFix(issue)) {
+                                    issue.userChoice = 'Skipped';
+                                } else {
+                                    importDecl.setModuleSpecifier(relativeImportPath);
+                                    issue.fixed = true;
+                                    fileModified = true;
+                                    console.log(chalk.green(`  Fixed: Changed to '${relativeImportPath}'`));
+                                }
+                            }
+                            issues.push(issue);
+                        }
+                    }
+                }
+            }
+
+            const commentedImports = findCommentedImports(file);
+            for (const { text, line, commentType } of commentedImports) {
+                console.log(chalk.gray(`  Found commented import: ${text} (line ${line}, type: ${commentType})`));
+                const importMatch = text.match(/import\s+.*\s+from\s+['"]([^'"]+)['"]/);
+                if (!importMatch) {
+                    issues.push({
+                        file: relativeFilePath,
+                        line,
+                        importPath: text,
+                        issue: `Invalid commented import syntax`,
+                        suggestion: 'Manually review and fix',
+                        commented: true,
+                    });
+                    continue;
+                }
+
+                const importPath = importMatch[1];
+                const resolvedPath = resolveImportPath(importPath, file);
+                const specialCase = Object.entries(config.specialCases).find(([key]) =>
+                    config.specialCases[key].prefixOnly ? importPath.startsWith(key) : importPath === key,
+                );
+
+                if (specialCase) {
+                    const [key, special] = specialCase;
+                    let suggestion: string | null = null;
+                    let newImportPath: string | undefined;
+                    const communityMatch = communitySolutions.find((sol) => sol.from === importPath);
+
+                    if (special.action === 'rename') {
+                        newImportPath = special.prefixOnly ? importPath.replace(key, special.value!) : special.value;
+                        suggestion = `Uncomment and rename to: ${text.replace(/^\s*\/\/+\s*|^#+\s*|\/\*|\*\//g, '').replace(importPath, newImportPath)}`;
+                    } else if (special.action === 'replace-method') {
+                        newImportPath = special.value;
+                        suggestion =
+                            communityMatch?.description ||
+                            `Uncomment and replace with: import { useUser } from '${newImportPath}' (adjust usage accordingly)`;
+                    } else {
+                        suggestion = 'Excluded from checks';
+                    }
+
+                    const issue: ImportIssue = {
+                        file: relativeFilePath,
+                        line,
+                        importPath,
+                        issue: `Commented special case: ${special.action}`,
+                        suggestion,
+                        commented: true,
+                    };
+
+                    if (AUTO_FIX && newImportPath && special.action !== 'exclude') {
+                        let shouldFix = !INTERACTIVE;
+                        if (INTERACTIVE) shouldFix = confirmFix(issue);
+                        if (shouldFix) {
+                            const fullText = file.getFullText();
+                            const lines = fullText.split('\n');
+                            lines[line - 1] = text
+                                .replace(/^\s*\/\/+\s*|^#+\s*|\/\*|\*\//g, '')
+                                .replace(importPath, newImportPath);
+                            file.replaceWithText(lines.join('\n'));
+                            issue.fixed = true;
+                            fileModified = true;
+                            console.log(chalk.green(`  Fixed: Uncommented and changed to '${newImportPath}'`));
+                        }
+                    }
+                    issues.push(issue);
+                    continue;
+                }
+
+                if (!resolvedPath) {
+                    const rootPkg = importPath.split('/')[0].startsWith('@')
+                        ? importPath.split('/').slice(0, 2).join('/')
+                        : importPath.split('/')[0];
+                    const isSpecialCaseRoot = Object.keys(config.specialCases).some((key) =>
+                        config.specialCases[key].prefixOnly ? key.startsWith(rootPkg) : key === rootPkg,
+                    );
+                    const suggestion =
+                        isSpecialCaseRoot || dir.dependencies?.[rootPkg]
+                            ? 'Uncomment to use'
+                            : `Module '${rootPkg}' not found. Run: bun add ${rootPkg}`;
+                    issues.push({
+                        file: relativeFilePath,
+                        line,
+                        importPath,
+                        issue: `Commented import '${importPath}' cannot be resolved`,
+                        suggestion,
+                        commented: true,
+                    });
+                    continue;
+                }
+
+                const suggestedAlias = findMatchingAlias(resolvedPath);
+                const newImportPath = suggestedAlias ? convertToAliasPath(resolvedPath, suggestedAlias) : importPath;
+                const issue: ImportIssue = {
+                    file: relativeFilePath,
+                    line,
+                    importPath,
+                    issue: suggestedAlias
+                        ? `Commented import should use alias '${suggestedAlias}'`
+                        : `Commented import has no matching alias`,
+                    suggestion: `Uncomment and change to: ${text.replace(/^\s*\/\/+\s*|^#+\s*|\/\*|\*\//g, '').replace(importPath, newImportPath)}`,
+                    commented: true,
+                };
+
+                if (AUTO_FIX && newImportPath) {
+                    let shouldFix = !INTERACTIVE;
+                    if (INTERACTIVE) shouldFix = confirmFix(issue);
+                    if (shouldFix) {
+                        const fullText = file.getFullText();
+                        const lines = fullText.split('\n');
+                        lines[line - 1] = text
+                            .replace(/^\s*\/\/+\s*|^#+\s*|\/\*|\*\//g, '')
+                            .replace(importPath, newImportPath);
+                        file.replaceWithText(lines.join('\n'));
+                        issue.fixed = true;
+                        fileModified = true;
+                        console.log(chalk.green(`  Fixed: Uncommented and changed to '${newImportPath}'`));
+                    }
+                }
+                issues.push(issue);
+            }
+
+            if (fileModified && AUTO_FIX) {
+                await file.save();
+                console.log(chalk.green(`  Saved changes to ${relativeFilePath}`));
+            }
+        }
+
+        const report = {
+            totalFiles: files.length,
+            totalIssues: issues.length,
+            standardIssues: issues.filter((i) => !i.commented).length,
+            commentedIssues: issues.filter((i) => i.commented).length,
+            fixedIssues: issues.filter((i) => i.fixed).length,
+            issues,
+        };
+
+        writeFileSync(dir.report, JSON.stringify(report, null, 2));
+        console.log(chalk.blue(`\nCompleted repocheck for ${files.length} files in ${dir.path}`));
+        console.log(
+            chalk.cyan(
+                `Total issues: ${issues.length} (Standard: ${report.standardIssues}, Commented: ${report.commentedIssues})`,
+            ),
+        );
+        console.log(chalk.green(`Fixed issues: ${report.fixedIssues}`));
+    }
 }
 
 // Use an IIFE to handle the async main function
