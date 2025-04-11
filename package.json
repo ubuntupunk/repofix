@@ -28,9 +28,11 @@
     "chalk": "^4.1.2",
     "node-fetch": "^2.6.7",
     "readline-sync": "^1.4.10",
-    "ts-morph": "^16.0.0"
+    "ts-morph": "^16.0.0",
+    "blessed": "^0.1.81"
   },
   "devDependencies": {
+    "@types//blessed": "^0.1.21",
     "@types/jest": "^29.5.0",
     "@types/node": "^18.15.11",
     "@types/node-fetch": "^2.6.3",
