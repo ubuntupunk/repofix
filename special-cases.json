@@ -1,0 +1,92 @@
+[
+  {
+    "from": "@supabase/supabase-js",
+    "to": "@stackframe/stack",
+    "action": "replace-method",
+    "description": "Migrate Supabase auth to Stack Auth for serverless compatibility",
+    "prefixOnly": true,
+    "category": "authentication",
+    "priority": 1,
+    "examples": [
+      {
+        "before": "import { createClient } from '@supabase/supabase-js';",
+        "after": "import { useUser } from '@stackframe/stack';"
+      }
+    ]
+  },
+  {
+    "from": "next/router",
+    "to": "next/navigation",
+    "action": "replace-method",
+    "description": "Migrate from Next.js Pages Router to App Router navigation APIs",
+    "prefixOnly": false,
+    "category": "nextjs",
+    "priority": 1,
+    "examples": [
+      {
+        "before": "import { useRouter } from 'next/router';",
+        "after": "import { useRouter } from 'next/navigation';"
+      }
+    ]
+  },
+  {
+    "from": "next/head",
+    "to": "next/navigation",
+    "action": "replace-method",
+    "description": "Replace next/head with App Router Metadata API for SEO",
+    "prefixOnly": false,
+    "category": "nextjs",
+    "priority": 2,
+    "examples": [
+      {
+        "before": "import Head from 'next/head';",
+        "after": "export const metadata = { title: 'My Page' };"
+      }
+    ]
+  },
+  {
+    "from": "expo-constants",
+    "to": "expo-device",
+    "action": "replace-method",
+    "description": "Replace deprecated expo-constants with expo-device for device info",
+    "prefixOnly": false,
+    "category": "expo",
+    "priority": 1,
+    "examples": [
+      {
+        "before": "import Constants from 'expo-constants';",
+        "after": "import Device from 'expo-device';"
+      }
+    ]
+  },
+  {
+    "from": "expo-location",
+    "to": "@react-native-community/geolocation",
+    "action": "replace-method",
+    "description": "Migrate from expo-location to community geolocation for bare React Native compatibility",
+    "prefixOnly": false,
+    "category": "expo",
+    "priority": 2,
+    "examples": [
+      {
+        "before": "import * as Location from 'expo-location';",
+        "after": "import Geolocation from '@react-native-community/geolocation';"
+      }
+    ]
+  },
+  {
+    "from": "moment",
+    "to": "date-fns",
+    "action": "rename",
+    "description": "Replace Moment.js with date-fns for better tree-shaking",
+    "prefixOnly": false,
+    "category": "general",
+    "priority": 3,
+    "examples": [
+      {
+        "before": "import moment from 'moment';",
+        "after": "import { format } from 'date-fns';"
+      }
+    ]
+  }
+]
