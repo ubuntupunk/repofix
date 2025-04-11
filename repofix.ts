@@ -1,3 +1,4 @@
+//non-tui version
 import { Project, SourceFile, SyntaxKind } from 'ts-morph';
 import { resolve, relative, dirname, join } from 'path';
 import { existsSync, readdirSync, readFileSync, writeFileSync, statSync, mkdirSync, unlinkSync } from 'fs';
