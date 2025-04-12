@@ -1,13 +1,21 @@
 //helpers.ts
 import { Project, SourceFile, SyntaxKind } from 'ts-morph';
-import { resolve, dirname, join } from 'path';
+import { resolve, dirname, join, relative } from 'path';
 import { existsSync, readdirSync, readFileSync, statSync, mkdirSync, writeFileSync } from 'fs';
 import fetch from 'node-fetch';
 import os from 'os';
+import kleur from 'kleur';
 
 // Interfaces
 interface AliasConfig { path: string; description: string; }
-interface DirectoryConfig { path: string; tsconfig: string; report: string; packageJson?: string; dependencies?: { [key: string]: string }; }
+interface DirectoryConfig {
+  path: string;
+  tsconfig: string;
+  report: string;
+  packageJson?: string;
+  dependencies?: { [key: string]: string };
+  workspaceName?: string;
+}
 interface CommunitySolution { from: string; to: string; action: 'rename' | 'replace-method' | 'exclude'; description: string; prefixOnly?: boolean; category: string; priority: number; examples: { before: string; after: string }[]; }
 
 // Utility Functions
@@ -42,6 +50,7 @@ export function scanMonorepo(rootDir: string): DirectoryConfig[] {
       const files = readdirSync(dir, { withFileTypes: true });
       let pkgPath: string | undefined;
       let tsconfigPath: string | undefined;
+      let workspaceName: string | undefined;
       for (const file of files) {
         const fullPath = join(dir, file.name);
         if (file.isDirectory() && !fullPath.includes('node_modules')) scanDir(fullPath);
@@ -49,7 +58,12 @@ export function scanMonorepo(rootDir: string): DirectoryConfig[] {
         else if (file.name === 'tsconfig.json') tsconfigPath = fullPath;
       }
       if (tsconfigPath) {
-        const dirConfig: DirectoryConfig = { path: join(dir, 'src'), tsconfig: tsconfigPath, report: join(dir, 'import-check-report.json') };
+        const dirConfig: DirectoryConfig = {
+            path: join(dir, 'src'),
+            tsconfig: tsconfigPath,
+            report: join(dir, 'import-check-report.json'),
+            workspaceName
+          };
         if (pkgPath) {
           try {
             const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
@@ -87,12 +101,18 @@ export function extractAliases(tsconfigPath: string): { [key: string]: AliasConf
   }
 }
 
-export function resolveImportPath(importPath: string, file: SourceFile, config: any): string | null {
+interface MonocheckConfig {
+  aliases: { [key: string]: AliasConfig };
+}
+
+export function resolveImportPath(importPath: string, file: SourceFile, config: MonocheckConfig): string | null {
   if (!config) return null;
   const fileDir = dirname(file.getFilePath());
   if (importPath.startsWith('.')) {
     const resolved = resolve(fileDir, importPath);
-    return existsSync(resolved) || existsSync(resolved + '.ts') || existsSync(resolved + '.tsx') ? resolved : null;
+    return existsSync(resolved) || existsSync(resolved + '.ts') || existsSync(resolved + '.tsx')
+      ? resolved
+      : null;
   }
   const aliasRoot = importPath.split('/')[0];
   const aliasPath = importPath.includes('/') ? importPath.split('/').slice(0, 2).join('/') : aliasRoot;
@@ -113,7 +133,7 @@ export function resolveImportPath(importPath: string, file: SourceFile, config: 
   }
 }
 
-export function findMatchingAlias(resolvedPath: string | null, config: any): string | null {
+export function findMatchingAlias(resolvedPath: string | null, config: MonocheckConfig): string | null {
   if (!resolvedPath || !config) return null;
   const possibleAliases = Object.entries(config.aliases)
     .filter(([_, config]) => resolvedPath.startsWith(config.path))
@@ -122,7 +142,7 @@ export function findMatchingAlias(resolvedPath: string | null, config: any): str
   return possibleAliases[0] || null;
 }
 
-export function convertToAliasPath(resolvedPath: string, alias: string, config: any): string | null {
+export function convertToAliasPath(resolvedPath: string, alias: string, config: MonocheckConfig): string | null {
   if (!config) return null;
   const aliasConfig = config.aliases[alias];
   if (!aliasConfig) return null;
@@ -135,7 +155,7 @@ export function findCommentedImports(file: SourceFile): Array<{ text: string; li
   const commentedImports: Array<{ text: string; line: number; commentType: string }> = [];
   const fullText = file.getFullText();
   const lines = fullText.split('\n');
-  lines.forEach((lineText, index) => {
+  lines.forEach((lineText: string, index: number) => {
     const trimmed = lineText.trim();
     if ((trimmed.startsWith('//') || trimmed.startsWith('#')) && trimmed.includes('import') && trimmed.includes('from')) {
       commentedImports.push({ text: trimmed, line: index + 1, commentType: trimmed.startsWith('//') ? 'single-line' : 'hash' });
