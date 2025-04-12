@@ -1,3 +1,4 @@
+// 1. Imports and Types
 import { Project, SourceFile } from 'ts-morph';
 import { resolve, relative, dirname } from 'path';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
@@ -14,7 +15,7 @@ import {
   findCommentedImports,
 } from './helpers';
 
-// Configuration and Constants
+// 2. Configuration and Constants
 const CONFIG_PATH = './monocheck.config.json';
 
 // Interfaces
@@ -24,7 +25,9 @@ interface SpecialCase { action: 'rename' | 'replace-method' | 'exclude'; value?:
 interface Config { directories: DirectoryConfig[]; aliases: { [key: string]: AliasConfig }; specialCases: { [key: string]: SpecialCase }; }
 interface CommunitySolution { from: string; to: string; action: 'rename' | 'replace-method' | 'exclude'; description: string; prefixOnly?: boolean; category: string; priority: number; examples: { before: string; after: string }[]; }
 interface ImportIssue { file: string; line: number; importPath: string; issue: string; suggestion: string | null; fixed?: boolean; commented?: boolean; userChoice?: string; }
-
+interface BlessedListWithItems extends blessed.Widgets.ListElement {
+  items: blessed.Widgets.BlessedElement[];
+}
 // Change Tracker for Undo
 class ChangeTracker {
   private changes: Array<{ file: string; originalContent: string; newContent?: string }> = [];
@@ -88,6 +91,11 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
     height: '50%',
     border: { type: 'line' },
     style: { border: { fg: 'cyan' }, selected: { bg: 'blue' }, item: { fg: 'white' } },
+    scrollbar: {
+      style: {
+        bg: 'blue'
+      }
+    },
     keys: true,
     items: ['1. Scan monorepo', '2. Add special case', '3. Community solutions', '4. Edit config', '5. Fix issues', '6. Save and exit'],
   });
@@ -126,7 +134,11 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         items: directories.map((d, i) => `${i + 1}. ${d.workspaceName || d.path.slice(0, 50)} (tsconfig: ${d.tsconfig.slice(0, 50)})`),
         interactive: true,
         scrollable: true,
-        scrollbar: { bg: 'blue' },
+        scrollbar: {
+          style: { 
+            bg: 'blue'
+           }
+          },
       });
 
       const logBox = blessed.log({
@@ -138,7 +150,11 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         border: { type: 'line' },
         style: { border: { fg: 'cyan' }, fg: 'white' },
         scrollable: true,
-        scrollbar: { bg: 'blue' },
+        scrollbar: {
+          style: {
+             bg: 'blue'
+             }
+          }, 
       });
 
       const progressBar = blessed.progressbar({
@@ -150,7 +166,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         border: { type: 'line' },
         style: { border: { fg: 'cyan' }, bar: { bg: 'green' } },
         filled: 0,
-      });
+      }) as blessed.Widgets.ProgressBarElement;
 
       const dirStatus = blessed.text({
         parent: dirScreen,
@@ -163,17 +179,18 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
       });
 
       dirScreen.key(['space'], () => {
-        const index = dirList.selected;
+        const list = dirList as unknown as { selected: number };
+        const index = list.selected;
         if (excluded.has(index)) {
           excluded.delete(index);
-          dirList.items[index].style.fg = 'green';
+          (dirList as blessed.Widgets.ListElement).getItem(index).style.fg = 'green';
         } else {
           excluded.add(index);
-          dirList.items[index].style.fg = 'gray';
+          (dirList as blessed.Widgets.ListElement).getItem(index).style.fg = 'gray';
         }
         dirScreen.render();
       });
-
+      
       dirScreen.key(['enter'], async () => {
         initialConfig.directories = directories.filter((_, i) => !excluded.has(i));
         for (const dir of initialConfig.directories) {
@@ -197,7 +214,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
       dirScreen.key(['h'], () => returnToMainScreen(dirScreen));
       dirScreen.key(['q'], () => returnToMainScreen(dirScreen));
 
-      dirList.items.forEach((item: any) => (item.style.fg = 'green'));
+      (dirList as BlessedListWithItems).items.forEach((item: any) => (item.style.fg = 'green'));
       dirList.focus();
       dirScreen.render();
     } else if (index === 1) { // Add special case
@@ -246,7 +263,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
       });
 
       actionList.on('select', () => {
-        actionList.items.forEach((item, i) => {
+        (actionList as BlessedListWithItems).items.forEach((item, i) => {
           item.style.fg = i === actionList.selected ? 'green' : 'white';
         });
         specialScreenRenderDebounced();
@@ -313,8 +330,11 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         items: solutions.map((s) => `${s.from.slice(0, 50)} → ${s.to.slice(0, 50)} (${s.description}) [${s.category}]`),
         interactive: true,
         scrollable: true,
-        scrollbar: { bg: 'blue' },
-      });
+        scrollbar: {
+          style: {
+            bg: 'blue'
+           }
+        });
     
       const exampleBox = blessed.box({
         parent: commScreen,
@@ -356,14 +376,14 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         const index = commList.selected;
         if (selected.has(index)) {
           selected.delete(index);
-          commList.items[index].style.fg = 'white';
+          (commList as BlessedListWithItems).items[index].style.fg = 'white';
         } else {
           selected.add(index);
-          commList.items[index].style.fg = 'green';
+          (commList as BlessedListWithItems).items[index].style.fg = 'green';
         }
         renderDebounced();
       });
-    
+   //OpenEditScreen 
       const openEditScreen = (sol: CommunitySolution, index: number) => {
         commScreen.destroy();
         const editScreen = blessed.screen({ smartCSR: true, title: 'Customize Special Case' });
@@ -428,8 +448,8 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         });
     
         actionList.on('select', () => {
-          actionList.items.forEach((item, i) => {
-            item.style.fg = i === actionList.selected ? 'green' : 'white';
+          (actionList as BlessedListWithItems).items.forEach((item, i) => {
+            item.style.fg = i === actionList.select? 'green' : 'white';
           });
           editScreen.render();
         });
@@ -566,17 +586,21 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
               items: initialConfig.directories.map((d, i) => `${i + 1}. ${d.path.slice(0, 50)} (tsconfig: ${d.tsconfig.slice(0, 50)})`),
               interactive: true,
               scrollable: true,
-              scrollbar: { bg: 'blue' },
+              scrollbar: { 
+                style: { 
+                  bg: 'blue' 
+                }
+              },
             });
 
             dirScreen.key(['space'], () => {
               const index = dirList.selected;
               if (excluded.has(index)) {
                 excluded.delete(index);
-                dirList.items[index].style.fg = 'green';
+                (dirList as BlessedListWithItems).items[index].style.fg = 'green';
               } else {
                 excluded.add(index);
-                dirList.items[index].style.fg = 'gray';
+                (dirList as BlessedListWithItems).items[index].style.fg = 'gray';
               }
               dirScreen.render();
             });
@@ -594,7 +618,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
             dirScreen.key(['h'], () => returnToMainScreen(dirScreen));
             dirScreen.key(['q'], () => returnToMainScreen(dirScreen));
 
-            dirList.items.forEach((item: any) => (item.style.fg = 'green'));
+            (dirList as BlessedListWithItems).items.forEach((item: any) => (item.style.fg = 'green'));
             dirList.focus();
             dirScreen.render();
           } else if (i === 1) {
@@ -619,7 +643,10 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
               width: '90%',
               height: '50%',
               border: { type: 'line' },
-              style: { border: { fg: 'cyan' }, selected: { bg: 'blue' }, item: { fg: 'white' } },
+              style: {
+                 border: { fg: 'cyan' },
+                 selected: { bg: 'on_blue'},
+                 item: { fg: 'white' } },
               keys: true,
               items: Object.entries(initialConfig.specialCases).map(([k, v]) => `${k}: ${v.action}${v.value ? ` → ${v.value}` : ''}${v.prefixOnly ? ' (prefix)' : ''}`),
               interactive: true,
@@ -721,21 +748,9 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
   return promise;
 }
 
-// TUI Config Setup
-async function initializeConfigWithTui(): Promise<Config> {
-  mainScreen = blessed.screen({ smartCSR: true, title: 'monocheck Config Setup' });
-  const configPromise = initializeMainMenu(mainScreen);
-  return configPromise.then((cfg) => {
-    if (!cfg.directories.length && !Object.keys(cfg.aliases).length && !Object.keys(cfg.specialCases).length) {
-      console.log(kleur.yellow('No configuration saved. To create monocheck.config.json manually, use:'));
-      console.log(kleur.cyan(`echo '{\n  "directories": [],\n  "aliases": {},\n  "specialCases": {}\n}' > ${CONFIG_PATH}`));
-      process.exit(0);
-    }
-    return cfg;
-  });
-}
+// 4 UI Component Functions
 
-// TUI Report Viewer
+// 4.1 TUI Report Viewer
 function displayReportTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
  if (isDebug) console.log('DEBUG: Displaying report screen');
   const reportScreen = blessed.screen({ smartCSR: true, title: 'monocheck Report Viewer' });
@@ -858,8 +873,8 @@ function displayReportTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
 //   renderDebounced();
 // }
 
-// TUI Fix Viewer
-function displayFixTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
+// 4.2  TUI Fix Viewer
+function displayFixTui(issuesByDir: { [dir: string]: ImportIssue[] }): void {
   console.log('DEBUG: Displaying fix screen');
   const fixScreen = blessed.screen({ smartCSR: true, title: 'monocheck Fix Issues' });
 
@@ -1119,8 +1134,9 @@ function displayFixTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
   renderDebounced();
 }
 
-// Scan and Report Logic
-async function scanAndReport(logBox: blessed.Widgets.Log | null, progressBar?: blessed.Widgets.ProgressBar): Promise<{ [dir: string]: ImportIssue[] }> {
+//5. Main Application Functions
+// 5.1 Scan and Report Logic
+async function scanAndReport(logBox: blessed.Widgets.Log | null, progressBar?: blessed.Widgets.ProgressBarElement): Promise<{ [dir: string]: ImportIssue[] }> {
   const communitySolutions = await fetchCommunitySolutions();
   const issuesByDir: { [dir: string]: ImportIssue[] } = {};
 
@@ -1357,6 +1373,21 @@ async function scanAndReport(logBox: blessed.Widgets.Log | null, progressBar?: b
   return issuesByDir;
 }
 
+// 5.2 TUI Config Setup
+async function initializeConfigWithTui(): Promise<Config> {
+  mainScreen = blessed.screen({ smartCSR: true, title: 'monocheck Config Setup' });
+  const configPromise = initializeMainMenu(mainScreen);
+  return configPromise.then((cfg) => {
+    if (!cfg.directories.length && !Object.keys(cfg.aliases).length && !Object.keys(cfg.specialCases).length) {
+      console.log(kleur.yellow('No configuration saved. To create monocheck.config.json manually, use:'));
+      console.log(kleur.cyan(`echo '{\n  "directories": [],\n  "aliases": {},\n  "specialCases": {}\n}' > ${CONFIG_PATH}`));
+      process.exit(0);
+    }
+    return cfg;
+  });
+}
+
+// 6. Main Function and Entry Point
 // Main monocheck Logic
 async function monocheck() {
   config = await initializeConfigWithTui();
@@ -1370,4 +1401,4 @@ async function monocheck() {
 monocheck().catch((err) => {
   console.error(kleur.red('Error running monocheck:'), err);
   process.exit(1);
-});
+})};

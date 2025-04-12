@@ -19,6 +19,8 @@ interface DirectoryConfig {
 interface CommunitySolution { from: string; to: string; action: 'rename' | 'replace-method' | 'exclude'; description: string; prefixOnly?: boolean; category: string; priority: number; examples: { before: string; after: string }[]; }
 
 // Utility Functions
+
+
 export async function fetchCommunitySolutions(): Promise<CommunitySolution[]> {
   const cacheDir = join(os.homedir(), '.monocheck', 'cache');
   const cachePath = join(cacheDir, 'special-cases.json');
