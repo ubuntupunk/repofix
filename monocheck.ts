@@ -1,15 +1,21 @@
-import { Project, SourceFile, SyntaxKind } from 'ts-morph';
-import { resolve, relative, dirname, join } from 'path';
-import { existsSync, readdirSync, readFileSync, writeFileSync, statSync, mkdirSync } from 'fs';
+import { Project, SourceFile } from 'ts-morph';
+import { resolve, relative, dirname } from 'path';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { spawnSync } from 'child_process';
 import kleur from 'kleur';
-import fetch from 'node-fetch';
-import os from 'os';
 import blessed from 'blessed';
+import {
+  fetchCommunitySolutions,
+  scanMonorepo,
+  extractAliases,
+  resolveImportPath,
+  findMatchingAlias,
+  convertToAliasPath,
+  findCommentedImports,
+} from './helpers';
 
 // Configuration and Constants
 const CONFIG_PATH = './monocheck.config.json';
-const COMMUNITY_DB_URL = 'https://raw.githubusercontent.com/ubuntupunk/repofix/main/special-cases.json';
 
 // Interfaces
 interface AliasConfig { path: string; description: string; }
@@ -19,140 +25,47 @@ interface Config { directories: DirectoryConfig[]; aliases: { [key: string]: Ali
 interface CommunitySolution { from: string; to: string; action: 'rename' | 'replace-method' | 'exclude'; description: string; prefixOnly?: boolean; category: string; priority: number; examples: { before: string; after: string }[]; }
 interface ImportIssue { file: string; line: number; importPath: string; issue: string; suggestion: string | null; fixed?: boolean; commented?: boolean; userChoice?: string; }
 
+// Change Tracker for Undo
+class ChangeTracker {
+  private changes: Array<{ file: string; originalContent: string; newContent?: string }> = [];
+
+  backup(file: string, content: string) {
+    if (!this.changes.find(c => c.file === file)) {
+      this.changes.push({ file, originalContent: content });
+    }
+  }
+
+  recordChange(file: string, newContent: string) {
+    const change = this.changes.find(c => c.file === file);
+    if (change) change.newContent = newContent;
+  }
+
+  undo() {
+    for (const change of this.changes) {
+      if (change.newContent) {
+        writeFileSync(change.file, change.originalContent);
+      }
+    }
+    this.changes = this.changes.filter(c => !c.newContent);
+    return this.changes.length === 0;
+  }
+
+  hasChanges(): boolean {
+    return this.changes.some(c => c.newContent);
+  }
+}
+
 // Module-Level Config
 let config: Config | undefined;
 let mainScreen: blessed.Widgets.Screen;
-
-// Utility Functions
-async function fetchCommunitySolutions(): Promise<CommunitySolution[]> {
-  const cacheDir = join(os.homedir(), '.monocheck', 'cache');
-  const cachePath = join(cacheDir, 'special-cases.json');
-  const ttl = 24 * 60 * 60 * 1000; // 24 hours
-  if (existsSync(cachePath) && Date.now() - statSync(cachePath).mtimeMs < ttl) {
-    return JSON.parse(readFileSync(cachePath, 'utf-8'));
-  }
-  try {
-    const response = await fetch(COMMUNITY_DB_URL);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const solutions = await response.json();
-    mkdirSync(cacheDir, { recursive: true });
-    writeFileSync(cachePath, JSON.stringify(solutions, null, 2));
-    return solutions;
-  } catch (err) {
-    return [];
-  }
-}
-
-function scanMonorepo(rootDir: string): DirectoryConfig[] {
-  const directories: DirectoryConfig[] = [];
-  const scanDir = (dir: string) => {
-    const files = readdirSync(dir, { withFileTypes: true });
-    let pkgPath: string | undefined;
-    let tsconfigPath: string | undefined;
-    for (const file of files) {
-      const fullPath = join(dir, file.name);
-      if (file.isDirectory() && !fullPath.includes('node_modules')) scanDir(fullPath);
-      else if (file.name === 'package.json') pkgPath = fullPath;
-      else if (file.name === 'tsconfig.json') tsconfigPath = fullPath;
-    }
-    if (tsconfigPath) {
-      const dirConfig: DirectoryConfig = { path: join(dir, 'src'), tsconfig: tsconfigPath, report: join(dir, 'import-check-report.json') };
-      if (pkgPath) {
-        const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
-        dirConfig.packageJson = pkgPath;
-        dirConfig.dependencies = { ...pkg.dependencies, ...pkg.devDependencies };
-      }
-      directories.push(dirConfig);
-    }
-  };
-  scanDir(rootDir);
-  return directories;
-}
-
-function extractAliases(tsconfigPath: string): { [key: string]: AliasConfig } {
-  try {
-    const tsconfig = JSON.parse(readFileSync(tsconfigPath, 'utf-8'));
-    const baseDir = dirname(tsconfigPath);
-    const paths = tsconfig.compilerOptions?.paths || {};
-    const aliases: { [key: string]: AliasConfig } = {};
-    for (const [alias, pathArray] of Object.entries(paths)) {
-      const cleanAlias = alias.replace('/*', '');
-      const cleanPath = (pathArray as string[])[0].replace('/*', '');
-      aliases[cleanAlias] = { path: resolve(baseDir, cleanPath), description: `Auto-detected from ${tsconfigPath}` };
-    }
-    return aliases;
-  } catch (err) {
-    return {};
-  }
-}
-
-function resolveImportPath(importPath: string, file: SourceFile): string | null {
-  if (!config) return null;
-  const fileDir = dirname(file.getFilePath());
-  if (importPath.startsWith('.')) {
-    const resolved = resolve(fileDir, importPath);
-    return existsSync(resolved) || existsSync(resolved + '.ts') || existsSync(resolved + '.tsx') ? resolved : null;
-  }
-  const aliasRoot = importPath.split('/')[0];
-  const aliasPath = importPath.includes('/') ? importPath.split('/').slice(0, 2).join('/') : aliasRoot;
-  if (config.aliases[aliasPath]) {
-    const relativePart = importPath.replace(`${aliasPath}/`, '');
-    const resolved = resolve(config.aliases[aliasPath].path, relativePart);
-    return existsSync(resolved) || existsSync(resolved + '.ts') || existsSync(resolved + '.tsx') ? resolved : null;
-  } else if (config.aliases[aliasRoot]) {
-    const relativePart = importPath.replace(`${aliasRoot}/`, '');
-    const resolved = resolve(config.aliases[aliasRoot].path, relativePart);
-    return existsSync(resolved) || existsSync(resolved + '.ts') || existsSync(resolved + '.tsx') ? resolved : null;
-  } else {
-    try {
-      return require.resolve(importPath, { paths: [process.cwd()] });
-    } catch {
-      return null;
-    }
-  }
-}
-
-function findMatchingAlias(resolvedPath: string | null): string | null {
-  if (!resolvedPath || !config) return null;
-  const possibleAliases = Object.entries(config.aliases)
-    .filter(([_, config]) => resolvedPath.startsWith(config.path))
-    .map(([alias]) => alias)
-    .sort((a, b) => b.length - a.length);
-  return possibleAliases[0] || null;
-}
-
-function convertToAliasPath(resolvedPath: string, alias: string): string | null {
-  if (!config) return null;
-  const aliasConfig = config.aliases[alias];
-  if (!aliasConfig) return null;
-  const relativePart = relative(aliasConfig.path, resolvedPath).replace(/\\/g, '/');
-  if (relativePart.startsWith('..')) return null;
-  return `${alias}/${relativePart}`;
-}
-
-function findCommentedImports(file: SourceFile): Array<{ text: string; line: number; commentType: string }> {
-  const commentedImports: Array<{ text: string; line: number; commentType: string }> = [];
-  const fullText = file.getFullText();
-  const lines = fullText.split('\n');
-  lines.forEach((lineText, index) => {
-    const trimmed = lineText.trim();
-    if ((trimmed.startsWith('//') || trimmed.startsWith('#')) && trimmed.includes('import') && trimmed.includes('from')) {
-      commentedImports.push({ text: trimmed, line: index + 1, commentType: trimmed.startsWith('//') ? 'single-line' : 'hash' });
-    }
-  });
-  file.getDescendantsOfKind(SyntaxKind.MultiLineCommentTrivia).forEach((comment) => {
-    const commentText = comment.getText();
-    if (commentText.includes('import') && commentText.includes('from')) {
-      const lines = commentText.split('\n').map((l) => l.replace(/^\s*\*+\s*/, '').trim());
-      const importLine = lines.find((l) => l.startsWith('import'));
-      if (importLine) commentedImports.push({ text: importLine, line: comment.getStartLineNumber(), commentType: 'multi-line' });
-    }
-  });
-  return commentedImports;
-}
+let activeProjects: Project[] = [];
+const changeTracker = new ChangeTracker();
 
 // Return to Main Screen Function
 function returnToMainScreen(currentScreen: blessed.Widgets.Screen) {
+  console.log('DEBUG: Returning to main screen from', currentScreen.title);
+  activeProjects.forEach(project => project.removeSourceFiles());
+  activeProjects = [];
   currentScreen.destroy();
   mainScreen = blessed.screen({ smartCSR: true, title: 'monocheck Config Setup' });
   initializeMainMenu(mainScreen);
@@ -160,8 +73,10 @@ function returnToMainScreen(currentScreen: blessed.Widgets.Screen) {
 
 // Main Menu Setup
 function initializeMainMenu(screen: blessed.Widgets.Screen) {
-  const AUTO_FIX = process.argv.includes('--fix');
-  let initialConfig: Config = existsSync(CONFIG_PATH) ? JSON.parse(readFileSync(CONFIG_PATH, 'utf-8')) : { directories: [], aliases: {}, specialCases: {} };
+  let initialConfig: Config = existsSync(CONFIG_PATH)
+    ? JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'))
+    : { directories: [], aliases: {}, specialCases: {} };
+  if (!initialConfig.specialCases) initialConfig.specialCases = {};
 
   const list = blessed.list({
     parent: screen,
@@ -172,7 +87,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
     border: { type: 'line' },
     style: { border: { fg: 'cyan' }, selected: { bg: 'blue' }, item: { fg: 'white' } },
     keys: true,
-    items: ['1. Scan monorepo', '2. Add special case', '3. Community solutions', '4. Edit config', ...(AUTO_FIX ? ['5. Fix issues'] : []), '6. Save and exit'],
+    items: ['1. Scan monorepo', '2. Add special case', '3. Community solutions', '4. Edit config', '5. Fix issues', '6. Save and exit'],
   });
 
   const status = blessed.text({
@@ -204,8 +119,11 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         border: { type: 'line' },
         style: { border: { fg: 'cyan' }, selected: { bg: 'blue' }, item: { fg: 'white' } },
         keys: true,
-        items: directories.map((d, i) => `${i + 1}. ${d.path} (tsconfig: ${d.tsconfig})`),
+        mouse: true,
+        items: directories.map((d, i) => `${i + 1}. ${d.path.slice(0, 50)} (tsconfig: ${d.tsconfig.slice(0, 50)})`),
         interactive: true,
+        scrollable: true,
+        scrollbar: { bg: 'blue' },
       });
 
       const logBox = blessed.log({
@@ -213,11 +131,22 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         top: '50%+2',
         left: 1,
         width: '90%',
-        height: '30%',
+        height: '20%',
         border: { type: 'line' },
         style: { border: { fg: 'cyan' }, fg: 'white' },
         scrollable: true,
         scrollbar: { bg: 'blue' },
+      });
+
+      const progressBar = blessed.progressbar({
+        parent: dirScreen,
+        top: '70%+2',
+        left: 1,
+        width: '90%',
+        height: 3,
+        border: { type: 'line' },
+        style: { border: { fg: 'cyan' }, bar: { bg: 'green' } },
+        filled: 0,
       });
 
       const dirStatus = blessed.text({
@@ -225,7 +154,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         bottom: 0,
         left: 1,
         width: '100%',
-        height: '20%',
+        height: '10%',
         content: 'Space to toggle exclusion, Enter to scan, h for home, q to return',
         style: { fg: 'yellow' },
       });
@@ -252,8 +181,14 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
           Object.assign(initialConfig.aliases, extractAliases(dir.tsconfig));
         }
         config = initialConfig;
-        const issuesByDir = await scanAndReport(logBox);
-        displayReportTui(issuesByDir);
+        try {
+          const issuesByDir = await scanAndReport(logBox, progressBar);
+          dirScreen.destroy();
+          displayReportTui(issuesByDir);
+        } catch (err) {
+          logBox.log(kleur.red(`Scan failed: ${err}`));
+          dirScreen.render();
+        }
       });
 
       dirScreen.key(['h'], () => returnToMainScreen(dirScreen));
@@ -289,6 +224,8 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         style: { border: { fg: 'gray' }, selected: { bg: 'blue' }, item: { fg: 'white' } },
         items: ['rename', 'replace-method', 'exclude'],
         keys: true,
+        mouse: true,
+        autoSelect: true,
         interactive: true,
       });
       blessed.text({ parent: form, top: 10, left: 1, content: 'New value (if applicable):', style: { fg: 'white' } });
@@ -301,41 +238,39 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         left: 1,
         width: '100%',
         height: '20%',
-        content: 'Tab to navigate, Space to select action, Enter to submit, h for home, q to return',
+        content: 'Tab to navigate, Enter to submit, h for home, q to return',
         style: { fg: 'yellow' },
       });
 
-      let selectedAction: number | null = null;
-      specialScreen.key(['space'], () => {
-        if (specialScreen.focused === actionList) {
-          const index = actionList.selected;
-          if (selectedAction === index) {
-            selectedAction = null;
-            actionList.items[index].style.fg = 'white';
-          } else {
-            if (selectedAction !== null) actionList.items[selectedAction].style.fg = 'white';
-            selectedAction = index;
-            actionList.items[index].style.fg = 'green';
-          }
-          specialScreen.render();
-        }
+      actionList.on('select', () => {
+        actionList.items.forEach((item, i) => {
+          item.style.fg = i === actionList.selected ? 'green' : 'white';
+        });
+        specialScreen.render();
       });
 
-      specialScreen.key(['enter'], () => {
+      form.on('submit', () => {
         const importPath = importInput.getValue().trim();
-        const action = selectedAction !== null ? actionList.items[selectedAction].content as 'rename' | 'replace-method' | 'exclude' : null;
+        const action = actionList.getItem(actionList.selected)?.content as 'rename' | 'replace-method' | 'exclude';
         const value = valueInput.getValue().trim() || undefined;
         const prefixOnly = prefixCheckbox.checked;
         if (importPath && action) {
           initialConfig.specialCases[importPath] = { action, value, prefixOnly };
-          specialStatus.setContent('Special case added!');
+          try {
+            writeFileSync(CONFIG_PATH, JSON.stringify(initialConfig, null, 2));
+            specialStatus.setContent(kleur.green(`Special case saved to ${CONFIG_PATH}`));
+          } catch (err) {
+            specialStatus.setContent(kleur.red(`Failed to save config: ${err}`));
+          }
           specialScreen.render();
-          setTimeout(() => returnToMainScreen(specialScreen), 500);
+          setTimeout(() => returnToMainScreen(specialScreen), 1000);
         } else {
-          specialStatus.setContent('Please fill in import path and select an action with Space.');
+          specialStatus.setContent(kleur.red('Please fill in import path and select an action.'));
           specialScreen.render();
         }
       });
+
+      specialScreen.key(['enter'], () => form.submit());
 
       specialScreen.key(['tab'], () => {
         const current = specialScreen.focused;
@@ -354,7 +289,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
     } else if (index === 2) { // Community solutions
       const solutions = await fetchCommunitySolutions();
       if (!solutions.length) {
-        status.setContent('No community solutions available. Check network and try again.');
+        status.setContent(kleur.red('No community solutions available. Check network and try again.'));
         screen.render();
         return;
       }
@@ -371,8 +306,11 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         border: { type: 'line' },
         style: { border: { fg: 'cyan' }, selected: { bg: 'blue' }, item: { fg: 'white' } },
         keys: true,
-        items: solutions.map((s) => `${s.from} → ${s.to} (${s.description}) [${s.category}]`),
+        mouse: true,
+        items: solutions.map((s) => `${s.from.slice(0, 50)} → ${s.to.slice(0, 50)} (${s.description}) [${s.category}]`),
         interactive: true,
+        scrollable: true,
+        scrollbar: { bg: 'blue' },
       });
 
       const exampleBox = blessed.box({
@@ -445,6 +383,8 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
           style: { border: { fg: 'gray' }, selected: { bg: 'blue' }, item: { fg: 'white' } },
           items: ['rename', 'replace-method', 'exclude'],
           keys: true,
+          mouse: true,
+          autoSelect: true,
           interactive: true,
           selected: ['rename', 'replace-method', 'exclude'].indexOf(sol.action),
         });
@@ -456,40 +396,38 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
           left: 1,
           width: '100%',
           height: '20%',
-          content: 'Tab to navigate, Space to select action, Enter to add, h for home, q to return',
+          content: 'Tab to navigate, Enter to add, h for home, q to return',
           style: { fg: 'yellow' },
         });
 
-        let selectedAction: number | null = null;
-        editScreen.key(['space'], () => {
-          if (editScreen.focused === actionList) {
-            const index = actionList.selected;
-            if (selectedAction === index) {
-              selectedAction = null;
-              actionList.items[index].style.fg = 'white';
-            } else {
-              if (selectedAction !== null) actionList.items[selectedAction].style.fg = 'white';
-              selectedAction = index;
-              actionList.items[index].style.fg = 'green';
+        actionList.on('select', () => {
+          actionList.items.forEach((item, i) => {
+            item.style.fg = i === actionList.selected ? 'green' : 'white';
+          });
+          editScreen.render();
+        });
+
+        form.on('submit', () => {
+          const value = valueInput.getValue().trim() || undefined;
+          const action = actionList.getItem(actionList.selected)?.content as 'rename' | 'replace-method' | 'exclude';
+          const prefixOnly = prefixCheckbox.checked;
+          if (action) {
+            initialConfig.specialCases[sol.from] = { action, value, prefixOnly };
+            try {
+              writeFileSync(CONFIG_PATH, JSON.stringify(initialConfig, null, 2));
+              editStatus.setContent(kleur.green(`Special case saved to ${CONFIG_PATH}`));
+            } catch (err) {
+              editStatus.setContent(kleur.red(`Failed to save config: ${err}`));
             }
+            editScreen.render();
+            setTimeout(() => returnToMainScreen(editScreen), 1000);
+          } else {
+            editStatus.setContent(kleur.red('Please select an action.'));
             editScreen.render();
           }
         });
 
-        editScreen.key(['enter'], () => {
-          const value = valueInput.getValue().trim() || undefined;
-          const action = selectedAction !== null ? actionList.items[selectedAction].content as 'rename' | 'replace-method' | 'exclude' : null;
-          const prefixOnly = prefixCheckbox.checked;
-          if (action) {
-            initialConfig.specialCases[sol.from] = { action, value, prefixOnly };
-            editStatus.setContent('Special case added!');
-            editScreen.render();
-            setTimeout(() => returnToMainScreen(editScreen), 500);
-          } else {
-            editStatus.setContent('Please select an action with Space.');
-            editScreen.render();
-          }
-        });
+        editScreen.key(['enter'], () => form.submit());
 
         editScreen.key(['tab'], () => {
           const current = editScreen.focused;
@@ -536,6 +474,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
           spawnSync(editorCmd, [CONFIG_PATH], { stdio: 'inherit' });
           try {
             initialConfig = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
+            if (!initialConfig.specialCases) initialConfig.specialCases = {};
           } catch (e) {
             console.log(kleur.yellow('Config not created or invalid. Returning to menu.'));
           }
@@ -551,6 +490,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
           border: { type: 'line' },
           style: { border: { fg: 'cyan' }, selected: { bg: 'blue' }, item: { fg: 'white' } },
           keys: true,
+          mouse: true,
           items: [
             `Directories (${initialConfig.directories.length})`,
             `Aliases (${Object.keys(initialConfig.aliases).length})`,
@@ -584,8 +524,11 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
               border: { type: 'line' },
               style: { border: { fg: 'cyan' }, selected: { bg: 'blue' }, item: { fg: 'white' } },
               keys: true,
-              items: initialConfig.directories.map((d, i) => `${i + 1}. ${d.path} (tsconfig: ${d.tsconfig})`),
+              mouse: true,
+              items: initialConfig.directories.map((d, i) => `${i + 1}. ${d.path.slice(0, 50)} (tsconfig: ${d.tsconfig.slice(0, 50)})`),
               interactive: true,
+              scrollable: true,
+              scrollbar: { bg: 'blue' },
             });
 
             dirScreen.key(['space'], () => {
@@ -602,6 +545,11 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
 
             dirScreen.key(['enter'], () => {
               initialConfig.directories = initialConfig.directories.filter((_, i) => !excluded.has(i));
+              try {
+                writeFileSync(CONFIG_PATH, JSON.stringify(initialConfig, null, 2));
+              } catch (err) {
+                console.log(kleur.red(`Failed to save config: ${err}`));
+              }
               returnToMainScreen(dirScreen);
             });
 
@@ -614,7 +562,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
           } else if (i === 1) {
             console.log(kleur.yellow('Alias editing not yet implemented in TUI. Modify monocheck.config.json manually.'));
             returnToMainScreen(editScreen);
-          } else if (i === 2) {
+          } else if (i == 2) {
             const specialScreen = blessed.screen({ smartCSR: true, title: 'Edit Special Cases' });
             const specialList = blessed.list({
               parent: specialScreen,
@@ -637,7 +585,14 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
               specialScreen.render();
             });
 
-            specialScreen.key(['enter'], () => returnToMainScreen(specialScreen));
+            specialScreen.key(['enter'], () => {
+              try {
+                writeFileSync(CONFIG_PATH, JSON.stringify(initialConfig, null, 2));
+              } catch (err) {
+                console.log(kleur.red(`Failed to save config: ${err}`));
+              }
+              returnToMainScreen(specialScreen);
+            });
             specialScreen.key(['h'], () => returnToMainScreen(specialScreen));
             specialScreen.key(['q'], () => returnToMainScreen(specialScreen));
 
@@ -662,6 +617,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
               spawnSync(editorCmd, [CONFIG_PATH], { stdio: 'inherit' });
               try {
                 initialConfig = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
+                if (!initialConfig.specialCases) initialConfig.specialCases = {};
               } catch (e) {
                 console.log(kleur.yellow('Config invalid after editing. Returning to menu.'));
               }
@@ -676,40 +632,40 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         editList.focus();
         editScreen.render();
       }
-    } else if (index === 4 && AUTO_FIX) { // Fix issues
+    } else if (index === 4) { // Fix issues
       screen.destroy();
       config = initialConfig;
-      const fixScreen = blessed.screen({ smartCSR: true, title: 'Fix Issues' });
-      const logBox = blessed.log({
-        parent: fixScreen,
-        top: 1,
-        left: 1,
-        width: '90%',
-        height: '50%',
-        border: { type: 'line' },
-        style: { border: { fg: 'cyan' }, fg: 'white' },
-        scrollable: true,
-        scrollbar: { bg: 'blue' },
-      });
-      const issuesByDir = await scanAndReport(logBox);
-      displayFixTui(issuesByDir);
-    } else if ((index === 4 && !AUTO_FIX) || (index === 5 && AUTO_FIX)) { // Save and exit
+      try {
+        const issuesByDir = await scanAndReport(null);
+        console.log('DEBUG: Fix screen loading with issues:', Object.keys(issuesByDir).length);
+        displayFixTui(issuesByDir);
+      } catch (err) {
+        console.log(kleur.red(`Fix scan failed: ${err}`));
+        returnToMainScreen(screen);
+      }
+    } else if (index === 5) { // Save and exit
       screen.destroy();
+      try {
+        writeFileSync(CONFIG_PATH, JSON.stringify(initialConfig, null, 2));
+        console.log(kleur.green(`Config saved to ${CONFIG_PATH}`));
+      } catch (err) {
+        console.log(kleur.red(`Failed to save config: ${err}`));
+      }
       resolvePromise(initialConfig);
     }
   });
 
-  screen.key(['h'], () => screen.render()); // Already on home screen
+  screen.key(['h'], () => screen.render());
   screen.key(['q'], () => {
-    if (!existsSync(CONFIG_PATH) && !initialConfig.directories.length && !Object.keys(initialConfig.aliases).length && !Object.keys(initialConfig.specialCases).length) {
-      console.log(kleur.yellow('No configuration saved. To create monocheck.config.json manually, use:'));
-      console.log(kleur.cyan(`echo '{\n  "directories": [],\n  "aliases": {},\n  "specialCases": {}\n}' > ${CONFIG_PATH}`));
-    } else {
+    try {
       writeFileSync(CONFIG_PATH, JSON.stringify(initialConfig, null, 2));
       console.log(kleur.green(`Config saved to ${CONFIG_PATH}`));
+    } catch (err) {
+      console.log(kleur.red(`Failed to save config: ${err}`));
     }
     process.exit(0);
   });
+  screen.key(['C-c'], () => process.exit(0));
 
   list.focus();
   screen.render();
@@ -733,7 +689,8 @@ async function initializeConfigWithTui(): Promise<Config> {
 
 // TUI Report Viewer
 function displayReportTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
-  const reportScreen = blessed.screen({ smartCSR: true, title: 'monocheck Reports' });
+  console.log('DEBUG: Displaying report screen');
+  const reportScreen = blessed.screen({ smartCSR: true, title: 'monocheck Report Viewer' });
 
   const reportList = blessed.list({
     parent: reportScreen,
@@ -744,8 +701,11 @@ function displayReportTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
     border: { type: 'line' },
     style: { border: { fg: 'cyan' }, selected: { bg: 'blue' }, item: { fg: 'white' } },
     keys: true,
-    items: Object.keys(issuesByDir).map((dir) => dir),
+    mouse: true,
+    items: Object.keys(issuesByDir).map((dir) => dir.slice(0, 28)),
     interactive: true,
+    scrollable: true,
+    scrollbar: { bg: 'blue' },
   });
 
   const issueBox = blessed.list({
@@ -757,6 +717,7 @@ function displayReportTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
     border: { type: 'line' },
     style: { border: { fg: 'cyan' }, selected: { bg: 'blue' }, item: { fg: 'white' } },
     keys: true,
+    mouse: true,
     scrollable: true,
     interactive: true,
   });
@@ -767,60 +728,153 @@ function displayReportTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
     left: 1,
     width: '100%',
     height: '20%',
-    content: 'Tab to switch panels, h for home, q to return',
+    content: `Viewing reports for ${Object.keys(issuesByDir).length} directories. Tab to switch panels, e to edit report, h for home, q to return`,
     style: { fg: 'yellow' },
   });
+
+  let lastRender = 0;
+  const renderDebounced = () => {
+    const now = Date.now();
+    if (now - lastRender > 50) {
+      reportScreen.render();
+      lastRender = now;
+    }
+  };
 
   reportList.on('select', (item, index) => {
     const dir = Object.keys(issuesByDir)[index];
     const issues = issuesByDir[dir];
     issueBox.setItems(
-      issues.map((i) => `${i.file}:${i.line} - ${i.importPath} (${i.issue}) ${i.suggestion ? `[${i.suggestion}]` : ''}`),
+      issues.map((i) => `${i.file.slice(0, 50)}:${i.line} - ${i.importPath.slice(0, 30)} (${i.issue}) ${i.suggestion ? `[${i.suggestion.slice(0, 50)}]` : ''}`),
     );
     issueBox.focus();
-    reportScreen.render();
+    renderDebounced();
   });
 
   reportScreen.key(['tab'], () => {
     if (reportScreen.focused === reportList) issueBox.focus();
     else reportList.focus();
-    reportScreen.render();
+    renderDebounced();
+  });
+
+  reportScreen.key(['e'], () => {
+    const index = reportList.selected;
+    const dir = Object.keys(issuesByDir)[index];
+    const reportPath = config!.directories.find(d => d.path === dir)?.report;
+    if (reportPath) {
+      reportScreen.destroy();
+      spawnSync('nano', [reportPath], { stdio: 'inherit' });
+      displayReportTui(issuesByDir);
+    }
   });
 
   reportScreen.key(['h'], () => returnToMainScreen(reportScreen));
   reportScreen.key(['q'], () => returnToMainScreen(reportScreen));
+  reportScreen.key(['C-c'], () => process.exit(0));
+
   reportList.focus();
-  reportScreen.render();
+  renderDebounced();
 }
 
 // TUI Fix Viewer
 function displayFixTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
-  const fixScreen = blessed.screen({ smartCSR: true, title: 'Fix Issues' });
+  console.log('DEBUG: Displaying fix screen');
+  const fixScreen = blessed.screen({ smartCSR: true, title: 'monocheck Fix Issues' });
 
-  const reportList = blessed.list({
+  const form = blessed.form({
     parent: fixScreen,
     top: 1,
     left: 1,
+    width: '90%',
+    height: '20%',
+    border: { type: 'line' },
+    style: { border: { fg: 'cyan' } },
+    keys: true,
+  });
+
+  const dryRunCheckbox = blessed.checkbox({
+    parent: form,
+    top: 1,
+    left: 1,
+    content: 'Dry Run (simulate fixes)?',
+    mouse: true,
+    style: { fg: 'white' },
+    checked: true,
+  });
+
+  const autoFixCheckbox = blessed.checkbox({
+    parent: form,
+    top: 3,
+    left: 1,
+    content: 'Auto Fix (apply all fixes)?',
+    mouse: true,
+    style: { fg: 'white' },
+    checked: false,
+  });
+
+  const confirmButton = blessed.button({
+    parent: form,
+    top: 5,
+    left: 1,
+    width: 20,
+    height: 3,
+    content: 'Confirm Fixes',
+    border: { type: 'line' },
+    style: { fg: 'white', border: { fg: 'gray' }, hover: { bg: 'blue' } },
+  });
+
+  const undoButton = blessed.button({
+    parent: form,
+    top: 5,
+    left: 22,
+    width: 20,
+    height: 3,
+    content: 'Undo Fixes',
+    border: { type: 'line' },
+    style: { fg: 'white', border: { fg: 'gray' }, hover: { bg: 'blue' } },
+    hidden: !changeTracker.hasChanges(),
+  });
+
+  const reportList = blessed.list({
+    parent: fixScreen,
+    top: '20%+2',
+    left: 1,
     width: '30%',
-    height: '80%',
+    height: '60%',
     border: { type: 'line' },
     style: { border: { fg: 'cyan' }, selected: { bg: 'blue' }, item: { fg: 'white' } },
     keys: true,
-    items: Object.keys(issuesByDir).map((dir) => dir),
+    mouse: true,
+    items: Object.keys(issuesByDir).map((dir) => dir.slice(0, 28)),
     interactive: true,
+    scrollable: true,
+    scrollbar: { bg: 'blue' },
   });
 
   const issueBox = blessed.list({
     parent: fixScreen,
-    top: 1,
+    top: '20%+2',
     left: '30%+2',
     width: '70%-2',
-    height: '80%',
+    height: '60%',
     border: { type: 'line' },
     style: { border: { fg: 'cyan' }, selected: { bg: 'blue' }, item: { fg: 'white' } },
     keys: true,
+    mouse: true,
     scrollable: true,
     interactive: true,
+  });
+
+  const logBox = blessed.log({
+    parent: fixScreen,
+    top: '80%+2',
+    left: 1,
+    width: '90%',
+    height: '20%-2',
+    border: { type: 'line' },
+    style: { border: { fg: 'cyan' }, fg: 'white' },
+    scrollable: true,
+    scrollbar: { bg: 'blue' },
   });
 
   const status = blessed.text({
@@ -828,302 +882,356 @@ function displayFixTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
     bottom: 0,
     left: 1,
     width: '100%',
-    height: '20%',
-    content: 'Tab to switch panels, Enter to fix, h for home, q to return',
+    height: '10%',
+    content: 'Tab to navigate, Enter to fix manually, c to confirm, u to undo, h for home, q to return',
     style: { fg: 'yellow' },
   });
+
+  let lastRender = 0;
+  const renderDebounced = () => {
+    const now = Date.now();
+    if (now - lastRender > 50) {
+      fixScreen.render();
+      lastRender = now;
+    }
+  };
 
   reportList.on('select', (item, index) => {
     const dir = Object.keys(issuesByDir)[index];
     const issues = issuesByDir[dir];
     issueBox.setItems(
-      issues.map((i) => `${i.file}:${i.line} - ${i.importPath} (${i.issue}) ${i.suggestion ? `[${i.suggestion}]` : ''}${i.fixed ? ' [Fixed]' : ''}`),
+      issues.map((i) => `${i.file.slice(0, 50)}:${i.line} - ${i.importPath.slice(0, 30)} (${i.issue}) ${i.suggestion ? `[${i.suggestion.slice(0, 50)}]` : ''}${i.fixed ? ' [Fixed]' : ''}`),
     );
     issueBox.focus();
-    fixScreen.render();
+    renderDebounced();
   });
 
+  const applyFix = async (issue: ImportIssue, dir: string, index: number) => {
+    const project = new Project({ tsConfigFilePath: config!.directories.find(d => d.path === dir)!.tsconfig });
+    activeProjects.push(project);
+    const file = project.getSourceFile(issue.file)!;
+    changeTracker.backup(issue.file, file.getFullText());
+    const importDecl = file.getImportDeclarations().find(d => d.getStartLineNumber() === issue.line);
+    let success = false;
+
+    if (importDecl && !issue.commented) {
+      const newImportPath = issue.suggestion?.match(/from '([^']+)'/)?.[1];
+      if (newImportPath) {
+        importDecl.setModuleSpecifier(newImportPath);
+        success = true;
+      }
+    } else if (issue.commented) {
+      const fullText = file.getFullText();
+      const lines = fullText.split('\n');
+      const newImportPath = issue.suggestion?.match(/from '([^']+)'/)?.[1];
+      if (newImportPath) {
+        lines[issue.line - 1] = lines[issue.line - 1].replace(/^\s*\/\/+\s*|^#+\s*|\/\*|\*\//g, '').replace(issue.importPath, newImportPath);
+        file.replaceWithText(lines.join('\n'));
+        success = true;
+      }
+    }
+
+    if (success) {
+      if (!dryRunCheckbox.checked) {
+        await file.save();
+        changeTracker.recordChange(issue.file, file.getFullText());
+        issue.fixed = true;
+        issueBox.setItem(index, `${issue.file.slice(0, 50)}:${issue.line} - ${issue.importPath.slice(0, 30)} (${issue.issue}) [Fixed]`);
+        logBox.log(kleur.green(`Fixed: ${issue.file}:${issue.line}`));
+      } else {
+        logBox.log(kleur.yellow(`[Dry Run] Would fix: ${issue.file}:${issue.line} to ${issue.suggestion}`));
+      }
+      undoButton.hidden = !changeTracker.hasChanges();
+      renderDebounced();
+    }
+  };
+
   issueBox.on('select', async (item, index) => {
+    if (autoFixCheckbox.checked) return;
     const dir = reportList.getItem(reportList.selected)?.content;
     if (!dir) return;
     const issue = issuesByDir[dir][index];
     if (!issue.fixed && issue.suggestion) {
-      const project = new Project({ tsConfigFilePath: config!.directories.find(d => d.path === dir)!.tsconfig });
-      const file = project.getSourceFile(issue.file)!;
-      const importDecl = file.getImportDeclarations().find(d => d.getStartLineNumber() === issue.line);
-      if (importDecl && !issue.commented) {
-        const newImportPath = issue.suggestion.match(/from '([^']+)'/)?.[1];
-        if (newImportPath) {
-          importDecl.setModuleSpecifier(newImportPath);
-          await file.save();
-          issue.fixed = true;
-          issueBox.setItem(index, `${issue.file}:${issue.line} - ${issue.importPath} (${issue.issue}) [Fixed]`);
-          status.setContent(`Fixed: ${issue.file}:${issue.line}`);
-          fixScreen.render();
-        }
-      } else if (issue.commented) {
-        const fullText = file.getFullText();
-        const lines = fullText.split('\n');
-        const newImportPath = issue.suggestion.match(/from '([^']+)'/)?.[1];
-        if (newImportPath) {
-          lines[issue.line - 1] = lines[issue.line - 1].replace(/^\s*\/\/+\s*|^#+\s*|\/\*|\*\//g, '').replace(issue.importPath, newImportPath);
-          file.replaceWithText(lines.join('\n'));
-          await file.save();
-          issue.fixed = true;
-          issueBox.setItem(index, `${issue.file}:${issue.line} - ${issue.importPath} (${issue.issue}) [Fixed]`);
-          status.setContent(`Fixed commented import: ${issue.file}:${issue.line}`);
-          fixScreen.render();
+      await applyFix(issue, dir, index);
+    }
+  });
+
+  confirmButton.on('press', async () => {
+    if (autoFixCheckbox.checked) {
+      for (const dir of Object.keys(issuesByDir)) {
+        const issues = issuesByDir[dir];
+        for (let i = 0; i < issues.length; i++) {
+          const issue = issues[i];
+          if (!issue.fixed && issue.suggestion) {
+            await applyFix(issue, dir, i);
+            issueBox.setItems(
+              issues.map((i, idx) => `${i.file.slice(0, 50)}:${i.line} - ${i.importPath.slice(0, 30)} (${i.issue}) ${i.suggestion ? `[${i.suggestion.slice(0, 50)}]` : ''}${i.fixed ? ' [Fixed]' : ''}`),
+            );
+          }
         }
       }
+      logBox.log(kleur.green('All fixes applied.'));
+    } else if (dryRunCheckbox.checked) {
+      for (const dir of Object.keys(issuesByDir)) {
+        const issues = issuesByDir[dir];
+        for (const issue of issues) {
+          if (!issue.fixed && issue.suggestion) {
+            logBox.log(kleur.yellow(`[Dry Run] Would fix: ${issue.file}:${issue.line} to ${issue.suggestion}`));
+          }
+        }
+      }
+    }
+    renderDebounced();
+  });
+
+  undoButton.on('press', () => {
+    if (changeTracker.undo()) {
+      logBox.log(kleur.green('All fixes undone.'));
+      for (const dir of Object.keys(issuesByDir)) {
+        const issues = issuesByDir[dir];
+        for (const issue of issues) {
+          issue.fixed = false;
+        }
+      }
+      const selectedDir = reportList.getItem(reportList.selected)?.content;
+      if (selectedDir) {
+        issueBox.setItems(
+          issuesByDir[selectedDir].map((i) => `${i.file.slice(0, 50)}:${i.line} - ${i.importPath.slice(0, 30)} (${i.issue}) ${i.suggestion ? `[${i.suggestion.slice(0, 50)}]` : ''}`),
+        );
+      }
+      undoButton.hidden = true;
+      renderDebounced();
     }
   });
 
   fixScreen.key(['tab'], () => {
-    if (fixScreen.focused === reportList) issueBox.focus();
-    else reportList.focus();
-    fixScreen.render();
+    const current = fixScreen.focused;
+    if (current === dryRunCheckbox) autoFixCheckbox.focus();
+    else if (current === autoFixCheckbox) confirmButton.focus();
+    else if (current === confirmButton && !undoButton.hidden) undoButton.focus();
+    else if (current === undoButton || current === confirmButton) reportList.focus();
+    else if (current === reportList) issueBox.focus();
+    else dryRunCheckbox.focus();
+    renderDebounced();
   });
 
+  fixScreen.key(['c'], () => confirmButton.emit('press'));
+  fixScreen.key(['u'], () => undoButton.emit('press'));
   fixScreen.key(['h'], () => returnToMainScreen(fixScreen));
   fixScreen.key(['q'], () => returnToMainScreen(fixScreen));
+  fixScreen.key(['C-c'], () => process.exit(0));
+
   reportList.focus();
-  fixScreen.render();
+  renderDebounced();
 }
 
 // Scan and Report Logic
-async function scanAndReport(logBox: blessed.Widgets.Log): Promise<{ [dir: string]: ImportIssue[] }> {
-  const AUTO_FIX = process.argv.includes('--fix');
-  const DRY_RUN = process.argv.includes('--dry-run');
+async function scanAndReport(logBox: blessed.Widgets.Log | null, progressBar?: blessed.Widgets.ProgressBar): Promise<{ [dir: string]: ImportIssue[] }> {
   const communitySolutions = await fetchCommunitySolutions();
   const issuesByDir: { [dir: string]: ImportIssue[] } = {};
 
   for (const dir of config!.directories) {
-    logBox.log(kleur.cyan(`Starting monocheck for ${dir.path}`));
+    logBox?.log(kleur.cyan(`Starting monocheck for ${dir.path}`));
+    console.log(`DEBUG: Scanning ${dir.path}`);
     const project = new Project({ tsConfigFilePath: dir.tsconfig });
-    let files = project.getSourceFiles(`${dir.path}/**/*.{ts,tsx}`);
-    if (files.length === 0) {
-      logBox.log(kleur.yellow(`No .ts/.tsx files found in ${dir.path}. Trying broader pattern...`));
-      files = project.getSourceFiles(`${dir.path}/**/*.{ts,tsx,js,jsx}`);
+    activeProjects.push(project);
+    let files: SourceFile[] = [];
+    try {
+      files = project.getSourceFiles(`${dir.path}/**/*.{ts,tsx}`);
+      if (files.length === 0) {
+        logBox?.log(kleur.yellow(`No .ts/.tsx files found in ${dir.path}. Trying broader pattern...`));
+        console.log(`DEBUG: No TS files in ${dir.path}, trying broader pattern`);
+        files = project.getSourceFiles(`${dir.path}/**/*.{ts,tsx,js,jsx}`);
+      }
+    } catch (err) {
+      logBox?.log(kleur.red(`Error scanning files in ${dir.path}: ${err}`));
+      console.log(kleur.red(`Error scanning ${dir.path}: ${err}`));
+      continue;
     }
 
     const issues: ImportIssue[] = [];
+    const totalFiles = files.length;
+    let processedFiles = 0;
+
     for (const file of files) {
-      const filePath = file.getFilePath();
-      const relativeFilePath = relative(process.cwd(), filePath);
-      logBox.log(kleur.yellow(`Processing: ${relativeFilePath}`));
-      const imports = file.getImportDeclarations();
-      let fileModified = false;
+      try {
+        const filePath = file.getFilePath();
+        const relativeFilePath = relative(process.cwd(), filePath);
+        logBox?.log(kleur.yellow(`Processing: ${relativeFilePath}`));
+        console.log(`DEBUG: Processing ${relativeFilePath}`);
+        const imports = file.getImportDeclarations();
 
-      for (const importDecl of imports) {
-        const importPath = importDecl.getModuleSpecifierValue();
-        const line = importDecl.getStartLineNumber();
+        for (const importDecl of imports) {
+          const importPath = importDecl.getModuleSpecifierValue();
+          const line = importDecl.getStartLineNumber();
 
-        if (!importPath.startsWith('.') && !importPath.startsWith('@')) continue;
-        if (importPath.startsWith('@') && !Object.keys(config!.aliases).some((a) => importPath.startsWith(a))) {
-          const rootPkg = importPath.split('/')[0];
-          if (dir.dependencies?.[rootPkg] || existsSync(resolve('node_modules', rootPkg))) continue;
-        }
-
-        const resolvedPath = resolveImportPath(importPath, file);
-        const specialCase = Object.entries(config!.specialCases).find(([key]) =>
-          config!.specialCases[key].prefixOnly ? importPath.startsWith(key) : importPath === key,
-        );
-        let suggestionFromCommunity: string | null = null;
-        const communityMatch = communitySolutions.find((sol) =>
-          sol.prefixOnly ? importPath.startsWith(sol.from) : importPath === sol.from,
-        );
-        if (communityMatch) {
-          suggestionFromCommunity =
-            communityMatch.action === 'rename'
-              ? `Rename to: import ... from '${communityMatch.to}'`
-              : `Replace with: import from '${communityMatch.to}' (${communityMatch.description})`;
-        }
-
-        if (specialCase) {
-          const [key, special] = specialCase;
-          let suggestion: string | null = suggestionFromCommunity;
-          let newImportPath: string | undefined;
-
-          if (special.action === 'rename') {
-            newImportPath = special.prefixOnly ? importPath.replace(key, special.value!) : special.value;
-            suggestion = suggestion || `Rename to: import ... from '${newImportPath}'`;
-          } else if (special.action === 'replace-method') {
-            newImportPath = special.value;
-            suggestion = suggestion || `Replace with: import { useUser } from '${newImportPath}' (adjust usage accordingly)`;
-          } else {
-            suggestion = 'Excluded from checks';
+          if (!importPath.startsWith('.') && !importPath.startsWith('@')) continue;
+          if (importPath.startsWith('@') && !Object.keys(config!.aliases).some((a) => importPath.startsWith(a))) {
+            const rootPkg = importPath.split('/')[0];
+            if (dir.dependencies?.[rootPkg] || existsSync(resolve('node_modules', rootPkg))) continue;
           }
 
-          const issue: ImportIssue = { file: relativeFilePath, line, importPath, issue: `Special case: ${special.action}`, suggestion };
-          if (AUTO_FIX && newImportPath && special.action !== 'exclude' && !DRY_RUN) {
-            importDecl.setModuleSpecifier(newImportPath);
-            issue.fixed = true;
-            fileModified = true;
+          const resolvedPath = resolveImportPath(importPath, file, config);
+          const specialCase = Object.entries(config!.specialCases).find(([key]) =>
+            config!.specialCases[key].prefixOnly ? importPath.startsWith(key) : importPath === key,
+          );
+          let suggestionFromCommunity: string | null = null;
+          const communityMatch = communitySolutions.find((sol) =>
+            sol.prefixOnly ? importPath.startsWith(sol.from) : importPath === sol.from,
+          );
+          if (communityMatch) {
+            suggestionFromCommunity =
+              communityMatch.action === 'rename'
+                ? `Rename to: import ... from '${communityMatch.to}'`
+                : `Replace with: import from '${communityMatch.to}' (${communityMatch.description})`;
           }
-          issues.push(issue);
-          continue;
-        }
 
-        if (importPath.startsWith('.')) {
-          const suggestedAlias = findMatchingAlias(resolvedPath);
-          if (suggestedAlias) {
-            const relativeImportPath = convertToAliasPath(resolvedPath!, suggestedAlias);
-            const issue: ImportIssue = {
-              file: relativeFilePath,
-              line,
-              importPath,
-              issue: `Relative import should use alias '${suggestedAlias}'`,
-              suggestion: relativeImportPath ? `Change to: import ... from '${relativeImportPath}'` : suggestionFromCommunity,
-            };
-            if (AUTO_FIX && relativeImportPath && !DRY_RUN) {
-              importDecl.setModuleSpecifier(relativeImportPath);
-              issue.fixed = true;
-              fileModified = true;
+          if (specialCase) {
+            const [key, special] = specialCase;
+            let suggestion: string | null = suggestionFromCommunity;
+            if (special.action === 'rename') {
+              const newImportPath = special.prefixOnly ? importPath.replace(key, special.value!) : special.value;
+              suggestion = suggestion || `Rename to: import ... from '${newImportPath}'`;
+            } else if (special.action === 'replace-method') {
+              suggestion = suggestion || `Replace with: import { useUser } from '${special.value}' (adjust usage accordingly)`;
+            } else {
+              suggestion = 'Excluded from checks';
             }
-            issues.push(issue);
-          } else if (!resolvedPath) {
-            issues.push({
-              file: relativeFilePath,
-              line,
-              importPath,
-              issue: `Relative import '${importPath}' cannot be resolved`,
-              suggestion: suggestionFromCommunity || `File not found at ${resolve(dirname(filePath), importPath)}`,
-            });
+            issues.push({ file: relativeFilePath, line, importPath, issue: `Special case: ${special.action}`, suggestion });
+            continue;
           }
-        } else if (importPath.startsWith('@')) {
-          const aliasRoot = importPath.split('/')[0];
-          const fullAlias = importPath.includes('/') ? importPath.split('/').slice(0, 2).join('/') : aliasRoot;
 
-          if (!config!.aliases[fullAlias] && !config!.aliases[aliasRoot]) {
-            const rootPkg = aliasRoot;
+          if (importPath.startsWith('.')) {
+            const suggestedAlias = findMatchingAlias(resolvedPath, config);
+            if (suggestedAlias) {
+              const relativeImportPath = convertToAliasPath(resolvedPath!, suggestedAlias, config);
+              issues.push({
+                file: relativeFilePath,
+                line,
+                importPath,
+                issue: `Relative import should use alias '${suggestedAlias}'`,
+                suggestion: relativeImportPath ? `Change to: import ... from '${relativeImportPath}'` : suggestionFromCommunity,
+              });
+            } else if (!resolvedPath) {
+              issues.push({
+                file: relativeFilePath,
+                line,
+                importPath,
+                issue: `Relative import '${importPath}' cannot be resolved`,
+                suggestion: suggestionFromCommunity || `File not found at ${resolve(dirname(filePath), importPath)}`,
+              });
+            }
+          } else if (importPath.startsWith('@')) {
+            const aliasRoot = importPath.split('/')[0];
+            const fullAlias = importPath.includes('/') ? importPath.split('/').slice(0, 2).join('/') : aliasRoot;
+
+            if (!config!.aliases[fullAlias] && !config!.aliases[aliasRoot]) {
+              const rootPkg = aliasRoot;
+              const isSpecialCaseRoot = Object.keys(config!.specialCases).some((key) =>
+                config!.specialCases[key].prefixOnly ? key.startsWith(rootPkg) : key === rootPkg,
+              );
+              const suggestion =
+                suggestionFromCommunity ||
+                (isSpecialCaseRoot || dir.dependencies?.[rootPkg]
+                  ? null
+                  : `Module '${rootPkg}' not found. Run: bun add ${rootPkg}`);
+              issues.push({
+                file: relativeFilePath,
+                line,
+                importPath,
+                issue: `Unknown alias '${fullAlias}' or '${aliasRoot}'`,
+                suggestion: suggestion || 'Verify alias in tsconfig.json or use relative path',
+              });
+            } else {
+              const expectedPath = config!.aliases[fullAlias]?.path || config!.aliases[aliasRoot]?.path;
+              if (resolvedPath && expectedPath && !resolvedPath.startsWith(expectedPath)) {
+                const suggestedAlias = findMatchingAlias(resolvedPath, config);
+                const relativeImportPath = suggestedAlias ? convertToAliasPath(resolvedPath, suggestedAlias, config) : null;
+                issues.push({
+                  file: relativeFilePath,
+                  line,
+                  importPath,
+                  issue: `Alias '${importPath}' resolves incorrectly`,
+                  suggestion: relativeImportPath
+                    ? `Change to: import ... from '${relativeImportPath}'`
+                    : suggestionFromCommunity || `Verify path for '${importPath}'`,
+                });
+              }
+            }
+          }
+        }
+
+        const commentedImports = findCommentedImports(file);
+        for (const { text, line } of commentedImports) {
+          const importMatch = text.match(/import\s+.*\s+from\s+['"]([^'"]+)['"]/);
+          if (!importMatch) {
+            issues.push({ file: relativeFilePath, line, importPath: text, issue: `Invalid commented import syntax`, suggestion: 'Manually review and fix', commented: true });
+            continue;
+          }
+
+          const importPath = importMatch[1];
+          const resolvedPath = resolveImportPath(importPath, file, config);
+          const specialCase = Object.entries(config!.specialCases).find(([key]) =>
+            config!.specialCases[key].prefixOnly ? importPath.startsWith(key) : importPath === key,
+          );
+          let suggestionFromCommunity: string | null = null;
+          const communityMatch = communitySolutions.find((sol) =>
+            sol.prefixOnly ? importPath.startsWith(sol.from) : importPath === sol.from,
+          );
+          if (communityMatch) {
+            suggestionFromCommunity =
+              communityMatch.action === 'rename'
+                ? `Uncomment and rename to: import ... from '${communityMatch.to}'`
+                : `Uncomment and replace with: import from '${communityMatch.to}' (${communityMatch.description})`;
+          }
+
+          if (specialCase) {
+            const [key, special] = specialCase;
+            let suggestion: string | null = suggestionFromCommunity;
+            if (special.action === 'rename') {
+              const newImportPath = special.prefixOnly ? importPath.replace(key, special.value!) : special.value;
+              suggestion = suggestion || `Uncomment and rename to: ${text.replace(/^\s*\/\/+\s*|^\s*\/\*|\*\//g, '').replace(importPath, newImportPath)}`;
+            } else if (special.action === 'replace-method') {
+              suggestion = suggestion || `Uncomment and replace with: import { useUser } from '${special.value}' (adjust usage accordingly)`;
+            } else {
+              suggestion = 'Excluded from checks';
+            }
+            issues.push({ file: relativeFilePath, line, importPath, issue: `Commented special case: ${special.action}`, suggestion, commented: true });
+            continue;
+          }
+
+          if (!resolvedPath) {
+            const rootPkg = importPath.split('/')[0].startsWith('@') ? importPath.split('/').slice(0, 2).join('/') : importPath.split('/')[0];
             const isSpecialCaseRoot = Object.keys(config!.specialCases).some((key) =>
               config!.specialCases[key].prefixOnly ? key.startsWith(rootPkg) : key === rootPkg,
             );
             const suggestion =
               suggestionFromCommunity ||
-              (isSpecialCaseRoot || dir.dependencies?.[rootPkg]
-                ? null
-                : `Module '${rootPkg}' not found. Run: bun add ${rootPkg}`);
-            issues.push({
-              file: relativeFilePath,
-              line,
-              importPath,
-              issue: `Unknown alias '${fullAlias}' or '${aliasRoot}'`,
-              suggestion: suggestion || 'Verify alias in tsconfig.json or use relative path',
-            });
-          } else {
-            const expectedPath = config!.aliases[fullAlias]?.path || config!.aliases[aliasRoot]?.path;
-            if (resolvedPath && expectedPath && !resolvedPath.startsWith(expectedPath)) {
-              const suggestedAlias = findMatchingAlias(resolvedPath);
-              const relativeImportPath = suggestedAlias ? convertToAliasPath(resolvedPath, suggestedAlias) : null;
-              const issue: ImportIssue = {
-                file: relativeFilePath,
-                line,
-                importPath,
-                issue: `Alias '${importPath}' resolves incorrectly`,
-                suggestion: relativeImportPath
-                  ? `Change to: import ... from '${relativeImportPath}'`
-                  : suggestionFromCommunity || `Verify path for '${importPath}'`,
-              };
-              if (AUTO_FIX && relativeImportPath && !DRY_RUN) {
-                importDecl.setModuleSpecifier(relativeImportPath);
-                issue.fixed = true;
-                fileModified = true;
-              }
-              issues.push(issue);
-            }
+              (isSpecialCaseRoot || dir.dependencies?.[rootPkg] ? 'Uncomment to use' : `Module '${rootPkg}' not found. Run: bun add ${rootPkg}`);
+            issues.push({ file: relativeFilePath, line, importPath, issue: `Commented import '${importPath}' cannot be resolved`, suggestion, commented: true });
+            continue;
           }
+
+          const suggestedAlias = findMatchingAlias(resolvedPath, config);
+          const newImportPath = suggestedAlias ? convertToAliasPath(resolvedPath, suggestedAlias, config) : importPath;
+          issues.push({
+            file: relativeFilePath,
+            line,
+            importPath,
+            issue: suggestedAlias ? `Commented import should use alias '${suggestedAlias}'` : `Commented import has no matching alias`,
+            suggestion: suggestionFromCommunity || `Uncomment and change to: ${text.replace(/^\s*\/\/+\s*|^\s*\/\*|\*\//g, '').replace(importPath, newImportPath)}`,
+            commented: true,
+          });
         }
+      } catch (err) {
+        logBox?.log(kleur.red(`Error processing ${file.getFilePath()}: ${err}`));
+        console.log(kleur.red(`Error processing ${file.getFilePath()}: ${err}`));
       }
 
-      const commentedImports = findCommentedImports(file);
-      for (const { text, line, commentType } of commentedImports) {
-        const importMatch = text.match(/import\s+.*\s+from\s+['"]([^'"]+)['"]/);
-        if (!importMatch) {
-          issues.push({ file: relativeFilePath, line, importPath: text, issue: `Invalid commented import syntax`, suggestion: 'Manually review and fix', commented: true });
-          continue;
-        }
-
-        const importPath = importMatch[1];
-        const resolvedPath = resolveImportPath(importPath, file);
-        const specialCase = Object.entries(config!.specialCases).find(([key]) =>
-          config!.specialCases[key].prefixOnly ? importPath.startsWith(key) : importPath === key,
-        );
-        let suggestionFromCommunity: string | null = null;
-        const communityMatch = communitySolutions.find((sol) =>
-          sol.prefixOnly ? importPath.startsWith(sol.from) : importPath === sol.from,
-        );
-        if (communityMatch) {
-          suggestionFromCommunity =
-            communityMatch.action === 'rename'
-              ? `Uncomment and rename to: import ... from '${communityMatch.to}'`
-              : `Uncomment and replace with: import from '${communityMatch.to}' (${communityMatch.description})`;
-        }
-
-        if (specialCase) {
-          const [key, special] = specialCase;
-          let suggestion: string | null = suggestionFromCommunity;
-          let newImportPath: string | undefined;
-
-          if (special.action === 'rename') {
-            newImportPath = special.prefixOnly ? importPath.replace(key, special.value!) : special.value;
-            suggestion = suggestion || `Uncomment and rename to: ${text.replace(/^\s*\/\/+\s*|^#+\s*|\/\*|\*\//g, '').replace(importPath, newImportPath)}`;
-          } else if (special.action === 'replace-method') {
-            newImportPath = special.value;
-            suggestion = suggestion || `Uncomment and replace with: import { useUser } from '${newImportPath}' (adjust usage accordingly)`;
-          } else {
-            suggestion = 'Excluded from checks';
-          }
-
-          const issue: ImportIssue = { file: relativeFilePath, line, importPath, issue: `Commented special case: ${special.action}`, suggestion, commented: true };
-          if (AUTO_FIX && newImportPath && special.action !== 'exclude' && !DRY_RUN) {
-            const fullText = file.getFullText();
-            const lines = fullText.split('\n');
-            lines[line - 1] = text.replace(/^\s*\/\/+\s*|^#+\s*|\/\*|\*\//g, '').replace(importPath, newImportPath);
-            file.replaceWithText(lines.join('\n'));
-            issue.fixed = true;
-            fileModified = true;
-          }
-          issues.push(issue);
-          continue;
-        }
-
-        if (!resolvedPath) {
-          const rootPkg = importPath.split('/')[0].startsWith('@') ? importPath.split('/').slice(0, 2).join('/') : importPath.split('/')[0];
-          const isSpecialCaseRoot = Object.keys(config!.specialCases).some((key) =>
-            config!.specialCases[key].prefixOnly ? key.startsWith(rootPkg) : key === rootPkg,
-          );
-          const suggestion =
-            suggestionFromCommunity ||
-            (isSpecialCaseRoot || dir.dependencies?.[rootPkg] ? 'Uncomment to use' : `Module '${rootPkg}' not found. Run: bun add ${rootPkg}`);
-          issues.push({ file: relativeFilePath, line, importPath, issue: `Commented import '${importPath}' cannot be resolved`, suggestion, commented: true });
-          continue;
-        }
-
-        const suggestedAlias = findMatchingAlias(resolvedPath);
-        const newImportPath = suggestedAlias ? convertToAliasPath(resolvedPath, suggestedAlias) : importPath;
-        const issue: ImportIssue = {
-          file: relativeFilePath,
-          line,
-          importPath,
-          issue: suggestedAlias ? `Commented import should use alias '${suggestedAlias}'` : `Commented import has no matching alias`,
-          suggestion: suggestionFromCommunity || `Uncomment and change to: ${text.replace(/^\s*\/\/+\s*|^#+\s*|\/\*|\*\//g, '').replace(importPath, newImportPath)}`,
-          commented: true,
-        };
-        if (AUTO_FIX && newImportPath && !DRY_RUN) {
-          const fullText = file.getFullText();
-          const lines = fullText.split('\n');
-          lines[line - 1] = text.replace(/^\s*\/\/+\s*|^#+\s*|\/\*|\*\//g, '').replace(importPath, newImportPath);
-          file.replaceWithText(lines.join('\n'));
-          issue.fixed = true;
-          fileModified = true;
-        }
-        issues.push(issue);
-      }
-
-      if (fileModified && AUTO_FIX && !DRY_RUN) {
-        await file.save();
-        logBox.log(kleur.green(`  Saved changes to ${relativeFilePath}`));
+      processedFiles++;
+      if (progressBar && totalFiles > 0 && logBox) {
+        progressBar.setProgress((processedFiles / totalFiles) * 100);
+        logBox.screen.render();
       }
     }
 
@@ -1136,10 +1244,15 @@ async function scanAndReport(logBox: blessed.Widgets.Log): Promise<{ [dir: strin
       fixedIssues: issues.filter((i) => i.fixed).length,
       issues,
     };
-    writeFileSync(dir.report, JSON.stringify(report, null, 2));
-    logBox.log(kleur.cyan(`Completed monocheck for ${files.length} files in ${dir.path}`));
-    logBox.log(kleur.gray(`Total issues: ${issues.length} (Standard: ${report.standardIssues}, Commented: ${report.commentedIssues})`));
-    logBox.log(kleur.green(`Fixed issues: ${report.fixedIssues}`));
+    try {
+      writeFileSync(dir.report, JSON.stringify(report, null, 2));
+      logBox?.log(kleur.cyan(`Completed monocheck for ${files.length} files in ${dir.path}`));
+      logBox?.log(kleur.gray(`Total issues: ${issues.length} (Standard: ${report.standardIssues}, Commented: ${report.commentedIssues})`));
+      logBox?.log(kleur.green(`Fixed issues: ${report.fixedIssues}`));
+    } catch (err) {
+      logBox?.log(kleur.red(`Error writing report for ${dir.path}: ${err}`));
+      console.log(kleur.red(`Error writing report for ${dir.path}: ${err}`));
+    }
   }
 
   return issuesByDir;

@@ -11,12 +11,20 @@ A powerful tool for managing and fixing import paths in TypeScript monorepos. Re
 - 🤝 Community-driven solutions database
 - 🚀 Batch processing with automatic fixes
 - 💡 Intelligent import path suggestions
+- Fix issues with dry run and undo support
 
 ## Installation
 
 ```bash
-npm install repofix
+npm install monocheck
 ```
+## Navigation
+Navigate the TUI with arrow keys, select options with Enter, and use:
+
+    h to return to the main menu
+    q to quit or return from sub-screens
+    c to confirm fixes
+    u to undo fixes
 
 ## Special Cases
 * *Special cases allow you to handle specific import scenarios:

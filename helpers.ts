@@ -1,7 +1,7 @@
 //helpers.ts
 import { Project, SourceFile, SyntaxKind } from 'ts-morph';
 import { resolve, dirname, join } from 'path';
-import { existsSync, readdirSync, readFileSync, statSync, mkdirSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, statSync, mkdirSync, writeFileSync } from 'fs';
 import fetch from 'node-fetch';
 import os from 'os';
 
@@ -16,7 +16,11 @@ export async function fetchCommunitySolutions(): Promise<CommunitySolution[]> {
   const cachePath = join(cacheDir, 'special-cases.json');
   const ttl = 24 * 60 * 60 * 1000; // 24 hours
   if (existsSync(cachePath) && Date.now() - statSync(cachePath).mtimeMs < ttl) {
-    return JSON.parse(readFileSync(cachePath, 'utf-8'));
+    try {
+      return JSON.parse(readFileSync(cachePath, 'utf-8'));
+    } catch (err) {
+      console.log(kleur.red(`Error reading cached solutions: ${err}`));
+    }
   }
   try {
     const response = await fetch('https://raw.githubusercontent.com/ubuntupunk/repofix/main/special-cases.json');
@@ -26,6 +30,7 @@ export async function fetchCommunitySolutions(): Promise<CommunitySolution[]> {
     writeFileSync(cachePath, JSON.stringify(solutions, null, 2));
     return solutions;
   } catch (err) {
+    console.log(kleur.red(`Error fetching community solutions: ${err}`));
     return [];
   }
 }
@@ -33,23 +38,31 @@ export async function fetchCommunitySolutions(): Promise<CommunitySolution[]> {
 export function scanMonorepo(rootDir: string): DirectoryConfig[] {
   const directories: DirectoryConfig[] = [];
   const scanDir = (dir: string) => {
-    const files = readdirSync(dir, { withFileTypes: true });
-    let pkgPath: string | undefined;
-    let tsconfigPath: string | undefined;
-    for (const file of files) {
-      const fullPath = join(dir, file.name);
-      if (file.isDirectory() && !fullPath.includes('node_modules')) scanDir(fullPath);
-      else if (file.name === 'package.json') pkgPath = fullPath;
-      else if (file.name === 'tsconfig.json') tsconfigPath = fullPath;
-    }
-    if (tsconfigPath) {
-      const dirConfig: DirectoryConfig = { path: join(dir, 'src'), tsconfig: tsconfigPath, report: join(dir, 'import-check-report.json') };
-      if (pkgPath) {
-        const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
-        dirConfig.packageJson = pkgPath;
-        dirConfig.dependencies = { ...pkg.dependencies, ...pkg.devDependencies };
+    try {
+      const files = readdirSync(dir, { withFileTypes: true });
+      let pkgPath: string | undefined;
+      let tsconfigPath: string | undefined;
+      for (const file of files) {
+        const fullPath = join(dir, file.name);
+        if (file.isDirectory() && !fullPath.includes('node_modules')) scanDir(fullPath);
+        else if (file.name === 'package.json') pkgPath = fullPath;
+        else if (file.name === 'tsconfig.json') tsconfigPath = fullPath;
       }
-      directories.push(dirConfig);
+      if (tsconfigPath) {
+        const dirConfig: DirectoryConfig = { path: join(dir, 'src'), tsconfig: tsconfigPath, report: join(dir, 'import-check-report.json') };
+        if (pkgPath) {
+          try {
+            const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+            dirConfig.packageJson = pkgPath;
+            dirConfig.dependencies = { ...pkg.dependencies, ...pkg.devDependencies };
+          } catch (err) {
+            console.log(kleur.yellow(`Error reading package.json at ${pkgPath}: ${err}`));
+          }
+        }
+        directories.push(dirConfig);
+      }
+    } catch (err) {
+      console.log(kleur.red(`Error scanning directory ${dir}: ${err}`));
     }
   };
   scanDir(rootDir);
@@ -69,6 +82,7 @@ export function extractAliases(tsconfigPath: string): { [key: string]: AliasConf
     }
     return aliases;
   } catch (err) {
+    console.log(kleur.red(`Error extracting aliases from ${tsconfigPath}: ${err}`));
     return {};
   }
 }
@@ -130,7 +144,7 @@ export function findCommentedImports(file: SourceFile): Array<{ text: string; li
   file.getDescendantsOfKind(SyntaxKind.MultiLineCommentTrivia).forEach((comment) => {
     const commentText = comment.getText();
     if (commentText.includes('import') && commentText.includes('from')) {
-      const lines = commentText.split('\n').map((l) => l.replace(/^\s*\*+\s*/, '').trim());
+      const lines = commentText.split('\n').map((l) => l.replace(/^\s*\/*\**\s*|\s*\*\/$/g, '').trim()).filter(l => l);
       const importLine = lines.find((l) => l.startsWith('import'));
       if (importLine) commentedImports.push({ text: importLine, line: comment.getStartLineNumber(), commentType: 'multi-line' });
     }
