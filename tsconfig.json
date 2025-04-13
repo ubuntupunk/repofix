@@ -10,6 +10,11 @@
     "forceConsistentCasingInFileNames": true,
     "declaration": true
   },
+  "types": ["node", "blessed"],
+  "typeRoots": [
+      "./node_modules/@types",
+      "./types"
+  ],
   "include": ["src/**/*"],
   "exclude": ["node_modules"]
 }

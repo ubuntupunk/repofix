@@ -19,8 +19,6 @@ interface DirectoryConfig {
 interface CommunitySolution { from: string; to: string; action: 'rename' | 'replace-method' | 'exclude'; description: string; prefixOnly?: boolean; category: string; priority: number; examples: { before: string; after: string }[]; }
 
 // Utility Functions
-
-
 export async function fetchCommunitySolutions(): Promise<CommunitySolution[]> {
   const cacheDir = join(os.homedir(), '.monocheck', 'cache');
   const cachePath = join(cacheDir, 'special-cases.json');
@@ -107,7 +105,7 @@ interface MonocheckConfig {
   aliases: { [key: string]: AliasConfig };
 }
 
-export function resolveImportPath(importPath: string, file: SourceFile, config: MonocheckConfig): string | null {
+export function resolveImportPath(importPath: string, file: SourceFile, config: MonocheckConfig | undefined): string | null {
   if (!config) return null;
   const fileDir = dirname(file.getFilePath());
   if (importPath.startsWith('.')) {
@@ -135,7 +133,7 @@ export function resolveImportPath(importPath: string, file: SourceFile, config: 
   }
 }
 
-export function findMatchingAlias(resolvedPath: string | null, config: MonocheckConfig): string | null {
+export function findMatchingAlias(resolvedPath: string | null, config: MonocheckConfig | undefined): string | null {
   if (!resolvedPath || !config) return null;
   const possibleAliases = Object.entries(config.aliases)
     .filter(([_, config]) => resolvedPath.startsWith(config.path))
@@ -144,7 +142,7 @@ export function findMatchingAlias(resolvedPath: string | null, config: Monocheck
   return possibleAliases[0] || null;
 }
 
-export function convertToAliasPath(resolvedPath: string, alias: string, config: MonocheckConfig): string | null {
+export function convertToAliasPath(resolvedPath: string, alias: string, config: MonocheckConfig | undefined): string | null {
   if (!config) return null;
   const aliasConfig = config.aliases[alias];
   if (!aliasConfig) return null;
