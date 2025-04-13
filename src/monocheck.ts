@@ -92,11 +92,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
     height: '50%',
     border: { type: 'line' },
     style: { border: { fg: 'cyan' }, selected: { bg: 'blue' }, item: { fg: 'white' } },
-    scrollbar: {
-      style: {
-        bg: 'blue'
-      }
-    },
+    scrollbar: { style: { bg: 'blue' } },
     keys: true,
     items: ['1. Scan monorepo', '2. Add special case', '3. Community solutions', '4. Edit config', '5. Fix issues', '6. Save and exit'],
   });
@@ -134,11 +130,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         items: directories.map((d, i) => `${i + 1}. ${d.workspaceName || d.path.slice(0, 50)} (tsconfig: ${d.tsconfig.slice(0, 50)})`),
         interactive: true,
         scrollable: true,
-        scrollbar: {
-          style: {
-            bg: 'blue'
-          }
-        },
+        scrollbar: { style: { bg: 'blue' } },
       });
 
       const logBox = blessed.log({
@@ -150,11 +142,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         border: { type: 'line' },
         style: { border: { fg: 'cyan' }, fg: 'white' },
         scrollable: true,
-        scrollbar: {
-          style: {
-            bg: 'blue'
-          }
-        },
+        scrollbar: { style: { bg: 'blue' } },
       });
 
       const progressBar = blessed.progressbar({
@@ -178,6 +166,15 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         style: { fg: 'yellow' },
       });
 
+      let lastRender = 0;
+      const renderDebounced = () => {
+        const now = Date.now();
+        if (now - lastRender > 50) {
+          dirScreen.render();
+          lastRender = now;
+        }
+      };
+
       dirScreen.key(['space'], () => {
         const index = dirList.selected;
         if (excluded.has(index)) {
@@ -187,7 +184,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
           excluded.add(index);
           (dirList as BlessedListWithItems).items[index].style.fg = 'gray';
         }
-        dirScreen.render();
+        renderDebounced();
       });
 
       dirScreen.key(['enter'], async () => {
@@ -196,6 +193,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
           if (!existsSync(dir.path)) {
             dir.path = dirname(dir.tsconfig);
             logBox.log(kleur.yellow(`No 'src' dir found for ${dir.tsconfig}. Using ${dir.path} instead.`));
+            renderDebounced();
           }
           Object.assign(initialConfig.aliases, extractAliases(dir.tsconfig));
         }
@@ -206,7 +204,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
           displayReportTui(issuesByDir);
         } catch (err) {
           logBox.log(kleur.red(`Scan failed: ${err}`));
-          dirScreen.render();
+          renderDebounced();
         }
       });
 
@@ -215,7 +213,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
 
       (dirList as BlessedListWithItems).items.forEach((item) => (item.style.fg = 'green'));
       dirList.focus();
-      dirScreen.render();
+      renderDebounced();
     } else if (index === 1) { // Add special case
       screen.destroy();
       const specialScreen = blessed.screen({ smartCSR: true, title: 'Add Special Case' });
@@ -338,11 +336,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         items: solutions.map((s) => `${s.from.slice(0, 50)} → ${s.to.slice(0, 50)} (${s.description}) [${s.category}]`),
         interactive: true,
         scrollable: true,
-        scrollbar: {
-          style: {
-            bg: 'blue'
-          }
-        }
+        scrollbar: { style: { bg: 'blue' } },
       });
 
       const exampleBox = blessed.box({
@@ -362,7 +356,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         left: 1,
         width: '100%',
         height: '20%',
-        content: 'Space to select, Enter to customize/add, e to edit, h for home',
+        content: 'Space to select, Enter to customize/add, e to edit/view, h for home',
         style: { fg: 'yellow' },
       });
 
@@ -521,6 +515,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
       screen.destroy();
       const editScreen = blessed.screen({ smartCSR: true, title: 'Edit Config' });
       if (!initialConfig.directories.length && !Object.keys(initialConfig.aliases).length && !Object.keys(initialConfig.specialCases).length) {
+        // Handle empty config
         const editorPrompt = blessed.prompt({
           parent: editScreen,
           top: 'center',
@@ -538,7 +533,6 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
           if (!existsSync(CONFIG_PATH)) {
             writeFileSync(CONFIG_PATH, JSON.stringify({ directories: [], aliases: {}, specialCases: {} }, null, 2));
           }
-          editScreen.destroy();
           spawnSync(editorCmd, [CONFIG_PATH], { stdio: 'inherit' });
           try {
             initialConfig = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
@@ -578,9 +572,35 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
           style: { fg: 'yellow' },
         });
 
+        const openEditor = (screen: blessed.Widgets.Screen) => {
+          const editorPrompt = blessed.prompt({
+            parent: screen,
+            top: 'center',
+            left: 'center',
+            width: '50%',
+            height: 'shrink',
+            border: { type: 'line' },
+            style: { border: { fg: 'cyan' }, fg: 'white' },
+            label: 'Edit Config',
+            content: 'Launch editor to modify monocheck.config.json?',
+          });
+
+          editorPrompt.readInput('Editor (nano/vim, default: nano): ', 'nano', (err: Error | null, editor: string | null) => {
+            const editorCmd = editor?.trim() === 'vim' ? 'vim' : 'nano';
+            spawnSync(editorCmd, [CONFIG_PATH], { stdio: 'inherit' });
+            try {
+              initialConfig = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
+              if (!initialConfig.specialCases) initialConfig.specialCases = {};
+            } catch (e) {
+              console.log(kleur.yellow('Config invalid after editing. Returning to menu.'));
+            }
+            returnToMainScreen(screen);
+          });
+        };
+
         editList.on('select', (item: blessed.Widgets.BoxElement, i: number) => {
-          editScreen.destroy();
           if (i === 0) { // Edit directories
+            editScreen.destroy();
             const dirScreen = blessed.screen({ smartCSR: true, title: 'Edit Directories' });
             const excluded = new Set<number>();
             const dirList = blessed.list({
@@ -596,11 +616,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
               items: initialConfig.directories.map((d, i) => `${i + 1}. ${d.path.slice(0, 50)} (tsconfig: ${d.tsconfig.slice(0, 50)})`),
               interactive: true,
               scrollable: true,
-              scrollbar: {
-                style: {
-                  bg: 'blue'
-                }
-              },
+              scrollbar: { style: { bg: 'blue' } },
             });
 
             dirScreen.key(['space'], () => {
@@ -635,6 +651,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
             console.log(kleur.yellow('Alias editing not yet implemented in TUI. Modify monocheck.config.json manually.'));
             returnToMainScreen(editScreen);
           } else if (i === 2) {
+            editScreen.destroy();
             const specialScreen = blessed.screen({ smartCSR: true, title: 'Edit Special Cases' });
             let lastRender = 0;
             const specialScreenRenderDebounced = () => {
@@ -652,11 +669,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
               width: '90%',
               height: '50%',
               border: { type: 'line' },
-              style: {
-                border: { fg: 'cyan' },
-                selected: { bg: 'blue' },
-                item: { fg: 'white' }
-              },
+              style: { border: { fg: 'cyan' }, selected: { bg: 'blue' }, item: { fg: 'white' } },
               keys: true,
               items: Object.entries(initialConfig.specialCases).map(([k, v]) => `${k}: ${v.action}${v.value ? ` → ${v.value}` : ''}${v.prefixOnly ? ' (prefix)' : ''}`),
               interactive: true,
@@ -684,30 +697,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
             specialList.focus();
             specialScreen.render();
           } else if (i === 3) { // Edit in editor
-            const editorPrompt = blessed.prompt({
-              parent: editScreen,
-              top: 'center',
-              left: 'center',
-              width: '50%',
-              height: 'shrink',
-              border: { type: 'line' },
-              style: { border: { fg: 'cyan' }, fg: 'white' },
-              label: 'Edit Config',
-              content: 'Launch editor to modify monocheck.config.json?',
-            });
-
-            editorPrompt.readInput('Editor (nano/vim, default: nano): ', 'nano', (err, editor) => {
-              const editorCmd = editor?.trim() === 'vim' ? 'vim' : 'nano';
-              editScreen.destroy();
-              spawnSync(editorCmd, [CONFIG_PATH], { stdio: 'inherit' });
-              try {
-                initialConfig = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
-                if (!initialConfig.specialCases) initialConfig.specialCases = {};
-              } catch (e) {
-                console.log(kleur.yellow('Config invalid after editing. Returning to menu.'));
-              }
-              returnToMainScreen(editScreen);
-            });
+            openEditor(editScreen);
           }
         });
 
@@ -775,10 +765,12 @@ function displayReportTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
     style: { border: { fg: 'cyan' }, selected: { bg: 'blue' }, item: { fg: 'white' } },
     keys: true,
     mouse: true,
-    items: Object.keys(issuesByDir).map((dir) => {
-      const dirConfig = config!.directories.find(d => d.path === dir);
-      return dirConfig?.workspaceName || dir.slice(0, 28);
-    }),
+    items: Object.keys(issuesByDir).length > 0
+      ? Object.keys(issuesByDir).map((dir) => {
+          const dirConfig = config!.directories.find(d => d.path === dir);
+          return dirConfig?.workspaceName || dir.slice(0, 28);
+        })
+      : ['No directories available'],
     interactive: true,
     scrollable: true,
     scrollbar: { style: { bg: 'blue' } },
@@ -796,6 +788,7 @@ function displayReportTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
     mouse: true,
     scrollable: true,
     interactive: true,
+    items: ['Select a directory to view issues'],
   });
 
   const status = blessed.text({
@@ -804,7 +797,7 @@ function displayReportTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
     left: 1,
     width: '100%',
     height: '20%',
-    content: `Viewing reports for ${Object.keys(issuesByDir).length} directories. Tab to switch panels, e to edit report, h for home`,
+    content: `Viewing reports for ${Object.keys(issuesByDir).length} directories. Tab or arrows to switch panels, e to edit/view report, h for home`,
     style: { fg: 'yellow' },
   });
 
@@ -818,6 +811,12 @@ function displayReportTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
   };
 
   reportList.on('select', (item, index) => {
+    if (Object.keys(issuesByDir).length === 0) {
+      issueBox.setItems(['No directories available']);
+      issueBox.style.item.fg = 'yellow';
+      renderDebounced();
+      return;
+    }
     const dir = Object.keys(issuesByDir)[index];
     const issues = issuesByDir[dir];
     if (issues.length === 0) {
@@ -833,14 +832,17 @@ function displayReportTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
     renderDebounced();
   });
 
-  reportScreen.key(['tab'], () => {
+  const switchPanels = () => {
     if (reportScreen.focused === reportList) issueBox.focus();
     else reportList.focus();
     renderDebounced();
-  });
+  };
+
+  reportScreen.key(['tab', 'left', 'right'], switchPanels);
 
   reportScreen.key(['e'], () => {
     const index = reportList.selected;
+    if (Object.keys(issuesByDir).length === 0) return;
     const dir = Object.keys(issuesByDir)[index];
     const reportPath = config!.directories.find(d => d.path === dir)?.report;
     if (reportPath) {
@@ -875,7 +877,7 @@ function displayReportTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
 
 // 4.2 TUI Fix Viewer
 function displayFixTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
-  console.log('DEBUG: Displaying fix screen');
+  if (isDebug) console.log('DEBUG: Displaying fix screen');
   const fixScreen = blessed.screen({ smartCSR: true, title: 'monocheck Fix Issues' });
 
   const form = blessed.form({
@@ -942,7 +944,9 @@ function displayFixTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
     style: { border: { fg: 'cyan' }, selected: { bg: 'blue' }, item: { fg: 'white' } },
     keys: true,
     mouse: true,
-    items: Object.keys(issuesByDir).map((dir) => dir.slice(0, 28)),
+    items: Object.keys(issuesByDir).length > 0
+      ? Object.keys(issuesByDir).map((dir) => dir.slice(0, 28))
+      : ['No directories available'],
     interactive: true,
     scrollable: true,
     scrollbar: { style: { bg: 'blue' } },
@@ -960,6 +964,7 @@ function displayFixTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
     mouse: true,
     scrollable: true,
     interactive: true,
+    items: ['Select a directory to view issues'],
   });
 
   const logBox = blessed.log({
@@ -980,7 +985,7 @@ function displayFixTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
     left: 1,
     width: '100%',
     height: '10%',
-    content: 'Tab to navigate, Enter to fix manually, c to confirm, u to undo, h for home, q to return',
+    content: 'Tab or arrows to navigate, Space to toggle Dry Run, Enter to fix manually, c to confirm, u to undo, h for home, q to return',
     style: { fg: 'yellow' },
   });
 
@@ -994,11 +999,20 @@ function displayFixTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
   };
 
   reportList.on('select', (item, index) => {
+    if (Object.keys(issuesByDir).length === 0) {
+      issueBox.setItems(['No directories available']);
+      issueBox.style.item.fg = 'yellow';
+      renderDebounced();
+      return;
+    }
     const dir = Object.keys(issuesByDir)[index];
     const issues = issuesByDir[dir];
     issueBox.setItems(
-      issues.map((i) => `${i.file.slice(0, 50)}:${i.line} - ${i.importPath.slice(0, 30)} (${i.issue}) ${i.suggestion ? `[${i.suggestion.slice(0, 50)}]` : ''}${i.fixed ? ' [Fixed]' : ''}`),
+      issues.length > 0
+        ? issues.map((i) => `${i.file.slice(0, 50)}:${i.line} - ${i.importPath.slice(0, 30)} (${i.issue}) ${i.suggestion ? `[${i.suggestion.slice(0, 50)}]` : ''}${i.fixed ? ' [Fixed]' : ''}`)
+        : ['No issues found for this directory'],
     );
+    issueBox.style.item.fg = issues.length > 0 ? 'white' : 'green';
     issueBox.focus();
     renderDebounced();
   });
@@ -1030,6 +1044,7 @@ function displayFixTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
 
     if (!success) {
       logBox.log(kleur.red(`Failed to apply fix: ${issue.file}:${issue.line}`));
+      renderDebounced();
     }
 
     if (success) {
@@ -1038,7 +1053,7 @@ function displayFixTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
         changeTracker.recordChange(issue.file, file.getFullText());
         issue.fixed = true;
         issueBox.setItems(
-          issuesByDir[dir].map((i, idx) => `${i.file.slice(0, 50)}:${i.line} - ${i.importPath.slice(0, 30)} (${i.issue}) ${i.suggestion ? `[${i.suggestion.slice(0, 50)}]` : ''}${i.fixed ? ' [Fixed]' : ''}`)
+          issuesByDir[dir].map((i, idx) => `${i.file.slice(0, 50)}:${i.line} - ${i.importPath.slice(0, 30)} (${i.issue}) ${i.suggestion ? `[${i.suggestion.slice(0, 50)}]` : ''}${i.fixed ? ' [Fixed]' : ''}`),
         );
         logBox.log(kleur.green(`Fixed: ${issue.file}:${issue.line}`));
       } else {
@@ -1051,13 +1066,25 @@ function displayFixTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
 
   issueBox.on('select', async (item, index) => {
     if (autoFixCheckbox.checked) return;
-    const dir = reportList.getItem(reportList.selected)?.content;
-    if (!dir) {
+    const dirIndex = reportList.selected;
+    if (Object.keys(issuesByDir).length === 0 || dirIndex >= Object.keys(issuesByDir).length) {
       logBox.log(kleur.yellow('No directory selected.'));
       renderDebounced();
       return;
     }
-    const issue = issuesByDir[dir][index];
+    const dir = Object.keys(issuesByDir)[dirIndex];
+    const issues = issuesByDir[dir];
+    if (!issues || issues.length === 0) {
+      logBox.log(kleur.yellow('No issues available for this directory.'));
+      renderDebounced();
+      return;
+    }
+    const issue = issues[index];
+    if (!issue) {
+      logBox.log(kleur.yellow('Invalid issue selected.'));
+      renderDebounced();
+      return;
+    }
     if (issue.fixed) {
       logBox.log(kleur.yellow('Issue already fixed.'));
       renderDebounced();
@@ -1108,18 +1135,28 @@ function displayFixTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
           issue.fixed = false;
         }
       }
-      const selectedDir = reportList.getItem(reportList.selected)?.content;
-      if (selectedDir) {
+      const dirIndex = reportList.selected;
+      if (dirIndex < Object.keys(issuesByDir).length) {
+        const selectedDir = Object.keys(issuesByDir)[dirIndex];
         issueBox.setItems(
-          issuesByDir[selectedDir].map((i) => `${i.file.slice(0, 50)}:${i.line} - ${i.importPath.slice(0, 30)} (${i.issue}) ${i.suggestion ? `[${i.suggestion.slice(0, 50)}]` : ''}`),
+          issuesByDir[selectedDir].length > 0
+            ? issuesByDir[selectedDir].map((i) => `${i.file.slice(0, 50)}:${i.line} - ${i.importPath.slice(0, 30)} (${i.issue}) ${i.suggestion ? `[${i.suggestion.slice(0, 50)}]` : ''}`)
+            : ['No issues found for this directory'],
         );
+        issueBox.style.item.fg = issuesByDir[selectedDir].length > 0 ? 'white' : 'green';
       }
       undoButton.hidden = true;
       renderDebounced();
     }
   });
 
-  fixScreen.key(['tab'], () => {
+  fixScreen.key(['space'], () => {
+    dryRunCheckbox.checked = !dryRunCheckbox.checked;
+    logBox.log(kleur.yellow(`Dry Run ${dryRunCheckbox.checked ? 'enabled' : 'disabled'}.`));
+    renderDebounced();
+  });
+
+  const switchPanels = () => {
     const current = fixScreen.focused;
     if (current === dryRunCheckbox) autoFixCheckbox.focus();
     else if (current === autoFixCheckbox) confirmButton.focus();
@@ -1128,7 +1165,9 @@ function displayFixTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
     else if (current === reportList) issueBox.focus();
     else dryRunCheckbox.focus();
     renderDebounced();
-  });
+  };
+
+  fixScreen.key(['tab', 'left', 'right'], switchPanels);
 
   fixScreen.key(['c'], () => confirmButton.emit('press'));
   fixScreen.key(['u'], () => undoButton.emit('press'));
@@ -1148,6 +1187,7 @@ async function scanAndReport(logBox: blessed.Widgets.Log | null, progressBar?: b
 
   for (const dir of config!.directories) {
     logBox?.log(kleur.cyan(`Starting monocheck for ${dir.workspaceName || dir.path}`));
+    logBox?.screen.render();
     if (isDebug) console.log(`DEBUG: Scanning ${dir.path}`);
     const project = new Project({ tsConfigFilePath: dir.tsconfig });
     activeProjects.push(project);
@@ -1156,11 +1196,13 @@ async function scanAndReport(logBox: blessed.Widgets.Log | null, progressBar?: b
       files = project.getSourceFiles(`${dir.path}/**/*.{ts,tsx}`);
       if (files.length === 0) {
         logBox?.log(kleur.yellow(`No .ts/.tsx files found in ${dir.path}. Trying broader pattern...`));
+        logBox?.screen.render();
         if (isDebug) console.log(`DEBUG: No TS files in ${dir.path}, trying broader pattern`);
         files = project.getSourceFiles(`${dir.path}/**/*.{ts,tsx,js,jsx}`);
       }
     } catch (err) {
       logBox?.log(kleur.red(`Error scanning files in ${dir.path}: ${err}`));
+      logBox?.screen.render();
       if (isDebug) console.log(kleur.red(`Error scanning ${dir.path}: ${err}`));
       continue;
     }
@@ -1174,11 +1216,13 @@ async function scanAndReport(logBox: blessed.Widgets.Log | null, progressBar?: b
         const filePath = file.getFilePath();
         if (typeof relative !== 'function') {
           logBox?.log(kleur.red('Error: relative function is undefined'));
+          logBox?.screen.render();
           if (isDebug) console.log('DEBUG: relative is undefined');
           throw new Error('relative function is undefined');
         }
         const relativeFilePath = relative(process.cwd(), filePath);
         logBox?.log(kleur.yellow(`Processing: ${relativeFilePath}`));
+        logBox?.screen.render();
         if (isDebug) console.log(`DEBUG: Processing ${relativeFilePath}`);
         const imports = file.getImportDeclarations();
 
@@ -1261,7 +1305,7 @@ async function scanAndReport(logBox: blessed.Widgets.Log | null, progressBar?: b
                 suggestionFromCommunity ||
                 (isSpecialCaseRoot || dir.dependencies?.[rootPkg]
                   ? null
-                  : `Module '${rootPkg}' not found. Run: bun add ${rootPkg}`);
+                  : `Module '${rootPkg}' not found. Run: npm/pnpm/bun add ${rootPkg}`);
               issues.push({
                 file: relativeFilePath,
                 line,
@@ -1373,6 +1417,7 @@ async function scanAndReport(logBox: blessed.Widgets.Log | null, progressBar?: b
         }
       } catch (err) {
         logBox?.log(kleur.red(`Error processing ${file.getFilePath()}: ${err}`));
+        logBox?.screen.render();
         if (isDebug) console.log(kleur.red(`Error processing ${file.getFilePath()}: ${err}`));
       }
 
@@ -1397,8 +1442,10 @@ async function scanAndReport(logBox: blessed.Widgets.Log | null, progressBar?: b
       logBox?.log(kleur.cyan(`Completed monocheck for ${files.length} files in ${dir.path}`));
       logBox?.log(kleur.gray(`Total issues: ${issues.length} (Standard: ${report.standardIssues}, Commented: ${report.commentedIssues})`));
       logBox?.log(kleur.green(`Fixed issues: ${report.fixedIssues}`));
+      logBox?.screen.render();
     } catch (err) {
       logBox?.log(kleur.red(`Error writing report for ${dir.path}: ${err}`));
+      logBox?.screen.render();
       console.log(kleur.red(`Error writing report for ${dir.path}: ${err}`));
     }
   }
