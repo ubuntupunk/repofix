@@ -19,6 +19,12 @@ interface DirectoryConfig {
 interface CommunitySolution { from: string; to: string; action: 'rename' | 'replace-method' | 'exclude'; description: string; prefixOnly?: boolean; category: string; priority: number; examples: { before: string; after: string }[]; }
 
 // Utility Functions
+
+/**
+ * Fetches community-provided special case solutions from a remote URL.
+ * Caches the results locally for a defined TTL (Time To Live).
+ * @returns {Promise<CommunitySolution[]>} A promise that resolves to an array of community solutions, or an empty array on error.
+ */
 export async function fetchCommunitySolutions(): Promise<CommunitySolution[]> {
   const cacheDir = join(os.homedir(), '.monocheck', 'cache');
   const cachePath = join(cacheDir, 'special-cases.json');
@@ -43,6 +49,13 @@ export async function fetchCommunitySolutions(): Promise<CommunitySolution[]> {
   }
 }
 
+/**
+ * Scans a directory recursively to find potential project directories within a monorepo.
+ * Identifies directories containing a tsconfig.json file.
+ * Reads package.json if present to extract dependencies and workspace name.
+ * @param {string} rootDir - The root directory of the monorepo to scan.
+ * @returns {DirectoryConfig[]} An array of configurations for the found directories.
+ */
 export function scanMonorepo(rootDir: string): DirectoryConfig[] {
   const directories: DirectoryConfig[] = [];
   const scanDir = (dir: string) => {
@@ -83,6 +96,11 @@ export function scanMonorepo(rootDir: string): DirectoryConfig[] {
   return directories;
 }
 
+/**
+ * Extracts TypeScript path aliases from a given tsconfig.json file.
+ * @param {string} tsconfigPath - The path to the tsconfig.json file.
+ * @returns {{ [key: string]: AliasConfig }} An object mapping alias names to their configuration (resolved path and description). Returns an empty object on error.
+ */
 export function extractAliases(tsconfigPath: string): { [key: string]: AliasConfig } {
   try {
     const tsconfig = JSON.parse(readFileSync(tsconfigPath, 'utf-8'));
@@ -105,6 +123,15 @@ interface MonocheckConfig {
   aliases: { [key: string]: AliasConfig };
 }
 
+/**
+ * Resolves an import path (module specifier) to its absolute file system path.
+ * Handles relative paths and alias paths based on the provided configuration.
+ * Checks for the existence of the resolved file (with .ts/.tsx extensions if needed).
+ * @param {string} importPath - The import path string (e.g., './utils', '@/components/Button').
+ * @param {SourceFile} file - The ts-morph SourceFile object where the import occurs.
+ * @param {MonocheckConfig | undefined} config - The monocheck configuration containing aliases.
+ * @returns {string | null} The resolved absolute path, or null if resolution fails or the file doesn't exist.
+ */
 export function resolveImportPath(importPath: string, file: SourceFile, config: MonocheckConfig | undefined): string | null {
   if (!config) return null;
   const fileDir = dirname(file.getFilePath());
@@ -133,6 +160,12 @@ export function resolveImportPath(importPath: string, file: SourceFile, config: 
   }
 }
 
+/**
+ * Finds the most specific path alias from the configuration that matches the start of a given resolved absolute path.
+ * @param {string | null} resolvedPath - The absolute path to find an alias for.
+ * @param {MonocheckConfig | undefined} config - The monocheck configuration containing aliases.
+ * @returns {string | null} The best matching alias name (e.g., '@/utils'), or null if no alias matches.
+ */
 export function findMatchingAlias(resolvedPath: string | null, config: MonocheckConfig | undefined): string | null {
   if (!resolvedPath || !config) return null;
   const possibleAliases = Object.entries(config.aliases)
@@ -142,6 +175,13 @@ export function findMatchingAlias(resolvedPath: string | null, config: Monocheck
   return possibleAliases[0] || null;
 }
 
+/**
+ * Converts an absolute file system path back into an alias-based import path.
+ * @param {string} resolvedPath - The absolute path to convert.
+ * @param {string} alias - The specific alias to use for conversion (e.g., '@').
+ * @param {MonocheckConfig | undefined} config - The monocheck configuration containing aliases.
+ * @returns {string | null} The resulting alias path (e.g., '@/components/Button'), or null if conversion is not possible (e.g., path is outside the alias directory).
+ */
 export function convertToAliasPath(resolvedPath: string, alias: string, config: MonocheckConfig | undefined): string | null {
   if (!config) return null;
   const aliasConfig = config.aliases[alias];
@@ -151,6 +191,11 @@ export function convertToAliasPath(resolvedPath: string, alias: string, config: 
   return `${alias}/${relativePart}`;
 }
 
+/**
+ * Finds import statements within comments (single-line, hash, or multi-line) in a source file.
+ * @param {SourceFile} file - The ts-morph SourceFile object to scan.
+ * @returns {Array<{ text: string; line: number; commentType: string }>} An array of objects, each representing a found commented import, including the import text, line number, and comment type.
+ */
 export function findCommentedImports(file: SourceFile): Array<{ text: string; line: number; commentType: string }> {
   const commentedImports: Array<{ text: string; line: number; commentType: string }> = [];
   const fullText = file.getFullText();

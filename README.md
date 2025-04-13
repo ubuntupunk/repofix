@@ -13,6 +13,10 @@ A powerful tool for managing and fixing import paths in TypeScript monorepos. Re
 - 💡 Intelligent import path suggestions
 - Fix issues with dry run and undo support
 
+## TUI Branch
+
+Check out the `tui` branch for an enhanced version featuring a full blessed TUI with interactive menu options for a more user-friendly experience.
+
 ## Installation
 
 ```bash
