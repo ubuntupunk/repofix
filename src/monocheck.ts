@@ -27,7 +27,7 @@ interface CommunitySolution { from: string; to: string; action: 'rename' | 'repl
 interface ImportIssue { file: string; line: number; importPath: string; issue: string; suggestion: string | null; fixed?: boolean; commented?: boolean; userChoice?: string; }
 
 interface BlessedListWithItems extends blessed.Widgets.ListElement {
-  items: blessed.Widgets.Node[];
+  items: blessed.Widgets.BoxElement[];
   selected: number;
 }
 
@@ -114,7 +114,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
   let resolvePromise: (value: Config) => void;
   const promise = new Promise<Config>((resolve) => (resolvePromise = resolve));
 
-  list.on('select', async (item: any, blessed: { screen: (arg0: { smartCSR: boolean; title: string; }) => any; list: (arg0: { parent: any; top: number; left: number; width: string; height: string | number; border: { type: string; } | { type: string; } | { type: string; } | { type: string; } | { type: string; } | { type: string; } | { type: string; }; style: { border: { fg: string; }; selected: { bg: string; }; item: { fg: string; }; } | { border: { fg: string; }; selected: { bg: string; }; item: { fg: string; }; } | { border: { fg: string; }; selected: { bg: string; }; item: { fg: string; }; } | { border: { fg: string; }; selected: { bg: string; }; item: { fg: string; }; } | { border: { fg: string; }; selected: { bg: string; }; item: { fg: string; }; } | { border: { fg: string; }; selected: { bg: string; }; item: { fg: string; }; } | { border: { fg: string; }; selected: { bg: string; }; item: { fg: string; }; }; keys: boolean; mouse?: boolean; items: string[] | string[]; interactive: boolean; scrollable?: boolean; scrollbar?: { style: { bg: string; }; } | { style: { bg: string; }; } | { style: { bg: string; }; }; autoSelect?: boolean; selected?: number; }) => any; log: (arg0: { parent: any; top: string; left: number; width: string; height: string; border: { type: string; }; style: { border: { fg: string; }; fg: string; }; scrollable: boolean; scrollbar: { style: { bg: string; }; }; }) => any; progressbar: (arg0: { parent: any; top: string; left: number; width: string; height: number; border: { type: string; }; style: { border: { fg: string; }; bar: { bg: string; }; }; filled: number; }) => blessed.Widgets.ProgressBarElement; text: (arg0: { parent: any; bottom?: number; left: number; width?: string; height?: string; content: string; style: { fg: string; } | { fg: string; } | { fg: string; } | { fg: string; } | { fg: string; } | { fg: string; } | { fg: string; } | { fg: string; } | { fg: string; } | { fg: string; } | { fg: string; }; top?: number; }) => void; form: (arg0: { parent: any; top: number; left: number; width: string; height: string; border: { type: string; } | { type: string; }; style: { border: { fg: string; }; } | { border: { fg: string; }; }; keys: boolean; }) => any; textbox: (arg0: { parent: any; top: number; left: number; width: string; height: number; inputOnFocus: boolean; border: { type: string; } | { type: string; } | { type: string; }; style: { fg: string; border: { fg: string; }; } | { fg: string; border: { fg: string; }; } | { fg: string; border: { fg: string; }; }; value?: string; }) => any; checkbox: (arg0: { parent: any; top: number; left: number; content: string; mouse: boolean; style: { fg: string; } | { fg: string; }; checked?: boolean | undefined; }) => any; box: (arg0: { parent: any; top: string; left: number; width: string; height: string; border: { type: string; }; style: { border: { fg: string; }; fg: string; }; content: string; }) => any; prompt: (arg0: { parent: any; top: string; left: string; width: string; height: string; border: { type: string; } | { type: string; }; style: { border: { fg: string; }; fg: string; } | { border: { fg: string; }; fg: string; }; label: string; content: string; }) => any; }.Widgets: any.Element: any, index: number) => {
+  list.on('select', async (item: blessed.Widgets.ListElement, index: number) => {
     if (index === 0) { // Scan monorepo
       const directories = scanMonorepo(process.cwd());
       screen.destroy();
@@ -135,7 +135,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         interactive: true,
         scrollable: true,
         scrollbar: {
-          style: { 
+          style: {
             bg: 'blue'
           }
         },
@@ -154,7 +154,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
           style: {
             bg: 'blue'
           }
-        }, 
+        },
       });
 
       const progressBar = blessed.progressbar({
@@ -189,7 +189,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         }
         dirScreen.render();
       });
-      
+
       dirScreen.key(['enter'], async () => {
         initialConfig.directories = directories.filter((_, i) => !excluded.has(i));
         for (const dir of initialConfig.directories) {
@@ -270,15 +270,15 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
       });
 
       actionList.on('select', () => {
-        (actionList as BlessedListWithItems).items.forEach((item: blessed.Widgets.Node, i: number) => {
-          item.style.fg = i === actionList.selected() ? 'green' : 'white';
+        (actionList as BlessedListWithItems).items.forEach((item: blessed.Widgets.BoxElement, i: number) => {
+          item.style.fg = i === actionList.selected ? 'green' : 'white';
         });
         specialScreenRenderDebounced();
       });
 
       form.on('submit', () => {
         const importPath = importInput.getValue().trim();
-        const action = actionList.getItem(actionList.selected())?.content as 'rename' | 'replace-method' | 'exclude';
+        const action = actionList.getItem(actionList.selected)?.content as 'rename' | 'replace-method' | 'exclude';
         const value = valueInput.getValue().trim() || undefined;
         const prefixOnly = prefixCheckbox.checked;
         if (importPath && action) {
@@ -286,6 +286,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
           try {
             writeFileSync(CONFIG_PATH, JSON.stringify(initialConfig, null, 2));
             specialStatus.setContent(kleur.green(`Special case saved to ${CONFIG_PATH}`));
+            specialScreenRenderDebounced();
           } catch (err) {
             specialStatus.setContent(kleur.red(`Failed to save config: ${err}`));
           }
@@ -321,7 +322,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         return;
       }
       screen.destroy();
-    
+
       const commScreen = blessed.screen({ smartCSR: true, title: 'Community Solutions' });
       const selected = new Set<number>();
       const commList = blessed.list({
@@ -343,7 +344,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
           }
         }
       });
-    
+
       const exampleBox = blessed.box({
         parent: commScreen,
         top: '50%+2',
@@ -354,7 +355,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         style: { border: { fg: 'cyan' }, fg: 'white' },
         content: '',
       });
-    
+
       const commStatus = blessed.text({
         parent: commScreen,
         bottom: 0,
@@ -364,7 +365,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         content: 'Space to select, Enter to customize/add, e to edit, h for home',
         style: { fg: 'yellow' },
       });
-    
+
       let lastRender = 0;
       const renderDebounced = () => {
         const now = Date.now();
@@ -373,15 +374,15 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
           lastRender = now;
         }
       };
-    
+
       commList.on('select', (item, i) => {
         const sol = solutions[i];
         exampleBox.setContent(`Before: ${sol.examples[0]?.before || 'N/A'}\nAfter: ${sol.examples[0]?.after || 'N/A'}`);
         renderDebounced();
       });
-    
+
       commScreen.key(['space'], () => {
-        const index = commList.selected();
+        const index = commList.selected;
         if (selected.has(index)) {
           selected.delete(index);
           (commList as BlessedListWithItems).items[index].style.fg = 'white';
@@ -391,7 +392,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
         }
         renderDebounced();
       });
-    
+
       const openEditScreen = (sol: CommunitySolution, index: number) => {
         commScreen.destroy();
         const editScreen = blessed.screen({ smartCSR: true, title: 'Customize Special Case' });
@@ -405,7 +406,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
           style: { border: { fg: 'cyan' } },
           keys: true,
         });
-    
+
         blessed.text({ parent: form, top: 0, left: 1, content: `Import path: ${sol.from}`, style: { fg: 'white' } });
         blessed.text({ parent: form, top: 2, left: 1, content: 'New value:', style: { fg: 'white' } });
         const valueInput = blessed.textbox({
@@ -444,7 +445,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
           style: { fg: 'white' },
           checked: sol.prefixOnly,
         });
-    
+
         const editStatus = blessed.text({
           parent: editScreen,
           bottom: 0,
@@ -454,23 +455,24 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
           content: 'Tab to navigate, Enter to add, h for home',
           style: { fg: 'yellow' },
         });
-    
+
         actionList.on('select', () => {
-          (actionList as BlessedListWithItems).items.forEach((item: blessed.Widgets.Node, i: number) => {
-            item.style.fg = i === actionList.selected() ? 'green' : 'white';
+          (actionList as BlessedListWithItems).items.forEach((item: blessed.Widgets.BoxElement, i: number) => {
+            item.style.fg = i === actionList.selected ? 'green' : 'white';
           });
           editScreen.render();
         });
-    
+
         form.on('submit', () => {
           const value = valueInput.getValue().trim() || undefined;
-          const action = actionList.getItem(actionList.selected())?.content as 'rename' | 'replace-method' | 'exclude';
+          const action = actionList.getItem(actionList.selected)?.content as 'rename' | 'replace-method' | 'exclude';
           const prefixOnly = prefixCheckbox.checked;
           if (action) {
             initialConfig.specialCases[sol.from] = { action, value, prefixOnly };
             try {
               writeFileSync(CONFIG_PATH, JSON.stringify(initialConfig, null, 2));
               editStatus.setContent(kleur.green(`Special case saved to ${CONFIG_PATH}`));
+              editScreen.render();
             } catch (err) {
               editStatus.setContent(kleur.red(`Failed to save config: ${err}`));
             }
@@ -481,9 +483,9 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
             editScreen.render();
           }
         });
-    
+
         editScreen.key(['enter'], () => form.submit());
-    
+
         editScreen.key(['tab'], () => {
           const current = editScreen.focused;
           if (current === valueInput) actionList.focus();
@@ -491,28 +493,28 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
           else valueInput.focus();
           editScreen.render();
         });
-    
+
         editScreen.key(['h'], () => returnToMainScreen(editScreen));
-    
+
         valueInput.focus();
         editScreen.render();
       };
-    
+
       commScreen.key(['enter'], () => {
-        const index = commList.selected();
+        const index = commList.selected;
         const sol = solutions[index];
         openEditScreen(sol, index);
       });
-    
+
       commScreen.key(['e'], () => {
-        const index = commList.selected();
+        const index = commList.selected;
         const sol = solutions[index];
         openEditScreen(sol, index);
       });
-    
+
       commScreen.key(['h'], () => returnToMainScreen(commScreen));
       commScreen.key(['q'], () => returnToMainScreen(commScreen));
-    
+
       commList.focus();
       renderDebounced();
     } else if (index === 3) { // Edit config
@@ -576,7 +578,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
           style: { fg: 'yellow' },
         });
 
-        editList.on('select', (item: blessed.Widgets.Element, i: number) => {
+        editList.on('select', (item: blessed.Widgets.BoxElement, i: number) => {
           editScreen.destroy();
           if (i === 0) { // Edit directories
             const dirScreen = blessed.screen({ smartCSR: true, title: 'Edit Directories' });
@@ -594,15 +596,15 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
               items: initialConfig.directories.map((d, i) => `${i + 1}. ${d.path.slice(0, 50)} (tsconfig: ${d.tsconfig.slice(0, 50)})`),
               interactive: true,
               scrollable: true,
-              scrollbar: { 
-                style: { 
-                  bg: 'blue' 
+              scrollbar: {
+                style: {
+                  bg: 'blue'
                 }
               },
             });
 
             dirScreen.key(['space'], () => {
-              const index = dirList.selected();
+              const index = dirList.selected;
               if (excluded.has(index)) {
                 excluded.delete(index);
                 (dirList as BlessedListWithItems).items[index].style.fg = 'green';
@@ -642,7 +644,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
                 lastRender = now;
               }
             };
-            
+
             const specialList = blessed.list({
               parent: specialScreen,
               top: 1,
@@ -661,7 +663,7 @@ function initializeMainMenu(screen: blessed.Widgets.Screen) {
             });
 
             specialScreen.key(['d'], () => {
-              const index = specialList.selected();
+              const index = specialList.selected;
               const key = Object.keys(initialConfig.specialCases)[index];
               delete initialConfig.specialCases[key];
               specialList.removeItem(index);
@@ -838,7 +840,7 @@ function displayReportTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
   });
 
   reportScreen.key(['e'], () => {
-    const index = reportList.selected();
+    const index = reportList.selected;
     const dir = Object.keys(issuesByDir)[index];
     const reportPath = config!.directories.find(d => d.path === dir)?.report;
     if (reportPath) {
@@ -874,7 +876,7 @@ function displayReportTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
 // 4.2 TUI Fix Viewer
 function displayFixTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
   console.log('DEBUG: Displaying fix screen');
-  const fixScreen = blessed.({ smartCSR: true, title: 'monocheck Fix Issues' });
+  const fixScreen = blessed.screen({ smartCSR: true, title: 'monocheck Fix Issues' });
 
   const form = blessed.form({
     parent: fixScreen,
@@ -1026,12 +1028,18 @@ function displayFixTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
       }
     }
 
+    if (!success) {
+      logBox.log(kleur.red(`Failed to apply fix: ${issue.file}:${issue.line}`));
+    }
+
     if (success) {
       if (!dryRunCheckbox.checked) {
         await file.save();
         changeTracker.recordChange(issue.file, file.getFullText());
         issue.fixed = true;
-        issueBox.setItem(index, `${issue.file.slice(0, 50)}:${issue.line} - ${issue.importPath.slice(0, 30)} (${issue.issue}) [Fixed]`); 
+        issueBox.setItems(
+          issuesByDir[dir].map((i, idx) => `${i.file.slice(0, 50)}:${i.line} - ${i.importPath.slice(0, 30)} (${i.issue}) ${i.suggestion ? `[${i.suggestion.slice(0, 50)}]` : ''}${i.fixed ? ' [Fixed]' : ''}`)
+        );
         logBox.log(kleur.green(`Fixed: ${issue.file}:${issue.line}`));
       } else {
         logBox.log(kleur.yellow(`[Dry Run] Would fix: ${issue.file}:${issue.line} to ${issue.suggestion}`));
@@ -1043,7 +1051,7 @@ function displayFixTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
 
   issueBox.on('select', async (item, index) => {
     if (autoFixCheckbox.checked) return;
-    const dir = reportList.getItem(reportList.selected())?.content;
+    const dir = reportList.getItem(reportList.selected)?.content;
     if (!dir) {
       logBox.log(kleur.yellow('No directory selected.'));
       renderDebounced();
@@ -1100,7 +1108,7 @@ function displayFixTui(issuesByDir: { [dir: string]: ImportIssue[] }) {
           issue.fixed = false;
         }
       }
-      const selectedDir = reportList.getItem(reportList.selected())?.content;
+      const selectedDir = reportList.getItem(reportList.selected)?.content;
       if (selectedDir) {
         issueBox.setItems(
           issuesByDir[selectedDir].map((i) => `${i.file.slice(0, 50)}:${i.line} - ${i.importPath.slice(0, 30)} (${i.issue}) ${i.suggestion ? `[${i.suggestion.slice(0, 50)}]` : ''}`),
@@ -1210,7 +1218,13 @@ async function scanAndReport(logBox: blessed.Widgets.Log | null, progressBar?: b
             } else {
               suggestion = 'Excluded from checks';
             }
-            issues.push({ file: relativeFilePath, line, importPath, issue: `Special case: ${special.action}`, suggestion });
+            issues.push({
+              file: relativeFilePath,
+              line,
+              importPath,
+              issue: `Special case: ${special.action}`,
+              suggestion
+            });
             continue;
           }
 
@@ -1223,7 +1237,7 @@ async function scanAndReport(logBox: blessed.Widgets.Log | null, progressBar?: b
                 line,
                 importPath,
                 issue: `Relative import should use alias '${suggestedAlias}'`,
-                suggestion: relativeImportPath ? `Change to: import ... from '${relativeImportPath}'` : (suggestionFromCommunity || ''),
+                suggestion: relativeImportPath ? `Change to: import ... from '${relativeImportPath}'` : suggestionFromCommunity || ''
               });
             } else if (!resolvedPath) {
               issues.push({
@@ -1231,7 +1245,7 @@ async function scanAndReport(logBox: blessed.Widgets.Log | null, progressBar?: b
                 line,
                 importPath,
                 issue: `Relative import '${importPath}' cannot be resolved`,
-                suggestion: suggestionFromCommunity || `File not found at ${resolve(dirname(filePath), importPath)}`,
+                suggestion: suggestionFromCommunity || `File not found at ${resolve(dirname(filePath), importPath)}`
               });
             }
           } else if (importPath.startsWith('@')) {
@@ -1253,7 +1267,7 @@ async function scanAndReport(logBox: blessed.Widgets.Log | null, progressBar?: b
                 line,
                 importPath,
                 issue: `Unknown alias '${fullAlias}' or '${aliasRoot}'`,
-                suggestion: suggestion || 'Verify alias in tsconfig.json or use relative path',
+                suggestion: suggestion || 'Verify alias in tsconfig.json or use relative path'
               });
             } else {
               const expectedPath = config!.aliases[fullAlias]?.path || config!.aliases[aliasRoot]?.path;
@@ -1267,7 +1281,7 @@ async function scanAndReport(logBox: blessed.Widgets.Log | null, progressBar?: b
                   issue: `Alias '${importPath}' resolves incorrectly`,
                   suggestion: relativeImportPath
                     ? `Change to: import ... from '${relativeImportPath}'`
-                    : suggestionFromCommunity || `Verify path for '${importPath}'`,
+                    : suggestionFromCommunity || `Verify path for '${importPath}'`
                 });
               }
             }
@@ -1278,7 +1292,14 @@ async function scanAndReport(logBox: blessed.Widgets.Log | null, progressBar?: b
         for (const { text, line } of commentedImports) {
           const importMatch = text.match(/import\s+.*\s+from\s+['"]([^'"]+)['"]/);
           if (!importMatch) {
-            issues.push({ file: relativeFilePath, line, importPath: text, issue: `Invalid commented import syntax`, suggestion: 'Manually review and fix', commented: true });
+            issues.push({
+              file: relativeFilePath,
+              line,
+              importPath: text,
+              issue: `Invalid commented import syntax`,
+              suggestion: 'Manually review and fix',
+              commented: true
+            });
             continue;
           }
 
@@ -1303,13 +1324,20 @@ async function scanAndReport(logBox: blessed.Widgets.Log | null, progressBar?: b
             let suggestion: string | null = suggestionFromCommunity;
             if (special.action === 'rename') {
               const newImportPath = special.prefixOnly ? importPath.replace(key, special.value!) : special.value;
-              suggestion: relativeImportPath ? `Change to: import ... from '${relativeImportPath}'` : (suggestionFromCommunity ?? ''),
+              suggestion = suggestion || `Uncomment and rename to: import ... from '${newImportPath}'`;
             } else if (special.action === 'replace-method') {
               suggestion = suggestion || `Uncomment and replace with: import { useUser } from '${special.value}' (adjust usage accordingly)`;
             } else {
               suggestion = 'Excluded from checks';
             }
-            issues.push({ file: relativeFilePath, line, importPath, issue: `Commented special case: ${special.action}`, suggestion, commented: true });
+            issues.push({
+              file: relativeFilePath,
+              line,
+              importPath,
+              issue: `Commented special case: ${special.action}`,
+              suggestion,
+              commented: true
+            });
             continue;
           }
 
@@ -1321,7 +1349,14 @@ async function scanAndReport(logBox: blessed.Widgets.Log | null, progressBar?: b
             const suggestion =
               suggestionFromCommunity ||
               (isSpecialCaseRoot || dir.dependencies?.[rootPkg] ? 'Uncomment to use' : `Module '${rootPkg}' not found. Run: bun add ${rootPkg}`);
-            issues.push({ file: relativeFilePath, line, importPath, issue: `Commented import '${importPath}' cannot be resolved`, suggestion, commented: true });
+            issues.push({
+              file: relativeFilePath,
+              line,
+              importPath,
+              issue: `Commented import '${importPath}' cannot be resolved`,
+              suggestion,
+              commented: true
+            });
             continue;
           }
 
@@ -1332,8 +1367,8 @@ async function scanAndReport(logBox: blessed.Widgets.Log | null, progressBar?: b
             line,
             importPath,
             issue: suggestedAlias ? `Commented import should use alias '${suggestedAlias}'` : `Commented import has no matching alias`,
-            suggestion: suggestionFromCommunity ?? `Verify path for '${importPath}'`,
-            commented: true,
+            suggestion: suggestionFromCommunity || `Verify path for '${importPath}'`,
+            commented: true
           });
         }
       } catch (err) {
@@ -1352,10 +1387,10 @@ async function scanAndReport(logBox: blessed.Widgets.Log | null, progressBar?: b
     const report = {
       totalFiles: files.length,
       totalIssues: issues.length,
-      standardIssues: issues.filter((i) => !i.commented).length,
-      commentedIssues: issues.filter((i) => i.commented).length,
-      fixedIssues: issues.filter((i) => i.fixed).length,
-      issues,
+      standardIssues: issues.filter((i: ImportIssue) => !i.commented).length,
+      commentedIssues: issues.filter((i: ImportIssue) => i.commented).length,
+      fixedIssues: issues.filter((i: ImportIssue) => i.fixed).length,
+      issues
     };
     try {
       writeFileSync(dir.report, JSON.stringify(report, null, 2));
